@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from "motion/react";
 
 import { cn } from "@/lib/utils";
 import { bindingFor, type ModuleGroup } from "@/lib/api/llm";
+import { TIER_STYLES } from "@/lib/api/llm-module-meta";
 import type { LLMChannel, LLMModel, LLMModuleBinding } from "@/lib/api/llm-types";
 
 import { ModuleBindingRow, type RowSaveState } from "./module-binding-row";
@@ -50,7 +51,12 @@ export function ModuleGroupPanel({
       >
         <header className="flex items-center justify-between gap-3 border-b border-line-soft bg-paper/40 px-6 py-4">
           <div>
-            <h3 className="font-serif text-lg font-semibold text-ink">{group.label}</h3>
+            <h3 className="flex items-center gap-2 font-serif text-lg font-semibold text-ink">
+              {group.tier && (
+                <span className={cn("size-[9px] shrink-0 rounded-full", TIER_STYLES[group.tier].dot)} aria-hidden />
+              )}
+              {group.label}
+            </h3>
             {group.hint && <p className="mt-0.5 text-caption text-muted">{group.hint}</p>}
           </div>
           <span

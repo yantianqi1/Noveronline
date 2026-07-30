@@ -1,4 +1,5 @@
 import type { LLMChannel, LLMModel, LLMModule, LLMModuleBinding } from "@/lib/api/llm-types";
+import { metaFor, TIER_ORDER, type CapabilityTier } from "@/lib/api/llm-module-meta";
 
 /**
  * Pure domain logic for the LLM settings surface: grouping the module registry
@@ -20,6 +21,8 @@ export type ModuleGroup = {
   key: string;
   label: string;
   hint: string;
+  /** Set when the group is a capability tier — drives the coloured dot. */
+  tier?: CapabilityTier;
   modules: LLMModule[];
 };
 
@@ -42,6 +45,30 @@ export function groupModules(modules: LLMModule[]): ModuleGroup[] {
   // Any group we don't have display metadata for still surfaces, at the end.
   for (const [key, list] of byGroup) {
     groups.push({ key, label: key, hint: "", modules: list });
+  }
+  return groups;
+}
+
+/**
+ * Group registry modules by capability tier (heaviest workload first), so the
+ * user can answer "which functions need my strongest model" at a glance. The
+ * tier comes from the frontend grading table in llm-module-meta; order within
+ * a tier follows the registry order.
+ */
+export function groupModulesByTier(modules: LLMModule[]): ModuleGroup[] {
+  const byTier = new Map<CapabilityTier, LLMModule[]>();
+  for (const mod of modules) {
+    const tier = metaFor(mod.module_key).tier;
+    const list = byTier.get(tier) ?? [];
+    list.push(mod);
+    byTier.set(tier, list);
+  }
+  const groups: ModuleGroup[] = [];
+  for (const meta of TIER_ORDER) {
+    const list = byTier.get(meta.key);
+    if (list && list.length > 0) {
+      groups.push({ key: meta.key, label: meta.label, hint: meta.hint, tier: meta.key, modules: list });
+    }
   }
   return groups;
 }

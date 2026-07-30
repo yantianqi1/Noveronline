@@ -2,6 +2,7 @@ import { LayoutGroup, motion } from "motion/react";
 
 import { cn } from "@/lib/utils";
 import { bindingFor, type ModuleGroup } from "@/lib/api/llm";
+import { TIER_STYLES } from "@/lib/api/llm-module-meta";
 import type { LLMModuleBinding } from "@/lib/api/llm-types";
 
 /**
@@ -51,6 +52,12 @@ export function ModuleGroupTabs({
                   layoutId="tab-active-pill"
                   transition={{ type: "spring", stiffness: 420, damping: 34 }}
                   className="absolute inset-0 rounded-panel border border-accent/30 bg-panel shadow-hairline"
+                />
+              )}
+              {group.tier && (
+                <span
+                  className={cn("relative z-10 size-[7px] shrink-0 rounded-full", TIER_STYLES[group.tier].dot)}
+                  aria-hidden
                 />
               )}
               <span className="relative z-10">{group.label}</span>

@@ -2,6 +2,7 @@ import { Check, Loader2, RotateCcw } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import type { BindingState } from "@/lib/api/llm";
+import { metaFor, tierInfo, TIER_STYLES } from "@/lib/api/llm-module-meta";
 import type { LLMChannel, LLMModel, LLMModule } from "@/lib/api/llm-types";
 
 import { ModelPicker, type ModelChoice } from "./model-picker";
@@ -38,6 +39,8 @@ export function ModuleBindingRow({
   const overridden = state.kind === "project";
   const value = currentChoice(state);
   const busy = saveState === "saving";
+  const meta = metaFor(module.module_key);
+  const tier = tierInfo(meta.tier);
 
   return (
     <div
@@ -53,8 +56,17 @@ export function ModuleBindingRow({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <StatusDot bound={bound} overridden={overridden} />
-          <span className="text-sm font-medium text-ink" title={module.description}>
-            {module.label}
+          <span className="text-sm font-medium text-ink" title={meta.descZh || undefined}>
+            {meta.labelZh}
+          </span>
+          <span
+            className={cn(
+              "shrink-0 rounded-full px-1.5 py-px text-caption font-medium",
+              TIER_STYLES[meta.tier].badge,
+            )}
+            title={`能力强度 · ${tier.hint}`}
+          >
+            {tier.label}
           </span>
           {overridden && (
             <span className="shrink-0 rounded-full bg-accent-wash px-1.5 py-px text-caption font-medium text-accent-strong">
@@ -96,7 +108,7 @@ export function ModuleBindingRow({
           value={value}
           onSave={(next) => onSave(module.module_key, next)}
           disabled={busy || disabled}
-          ariaLabel={module.label}
+          ariaLabel={meta.labelZh}
         />
       </div>
     </div>

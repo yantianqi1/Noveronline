@@ -22,6 +22,7 @@ import { readProjectSelection, type ProjectSelection } from "@/lib/api/overview-
 import {
   enabledChannels,
   groupModules,
+  groupModulesByTier,
   summarizeBindings,
 } from "@/lib/api/llm";
 import type {
@@ -37,6 +38,7 @@ import { ModuleGroupPanel } from "./module-group-card";
 import { ModuleGroupTabs } from "./module-group-tabs";
 import type { ModelChoice } from "./model-picker";
 import type { RowSaveState } from "./module-binding-row";
+import { ViewModeToggle, type SettingsViewMode } from "./view-mode-toggle";
 
 type LoadState =
   | { status: "loading" }
@@ -77,13 +79,17 @@ export function SettingsWorkspace({ projectId }: { projectId: string }) {
   const [savingKeyId, setSavingKeyId] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const [activeGroup, setActiveGroup] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<SettingsViewMode>("function");
 
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savedTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   const applying = batchProgress !== null;
   const readyChannels = useMemo(() => enabledChannels(channels), [channels]);
-  const groups = useMemo(() => groupModules(modules), [modules]);
+  const groups = useMemo(
+    () => (viewMode === "tier" ? groupModulesByTier(modules) : groupModules(modules)),
+    [modules, viewMode],
+  );
   const summary = useMemo(() => summarizeBindings(modules, bindings), [modules, bindings]);
   const modelCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -356,6 +362,14 @@ export function SettingsWorkspace({ projectId }: { projectId: string }) {
     setRowStates((prev) => ({ ...prev, [moduleKey]: s }));
   }
 
+  // Switching classification re-derives `groups`, so the previously-selected
+  // tab key no longer applies — reset it and let `resolvedGroup` re-pick the
+  // first family/tier that still needs binding.
+  function handleViewModeChange(mode: SettingsViewMode) {
+    setViewMode(mode);
+    setActiveGroup(null);
+  }
+
   function scheduleRowIdle(moduleKey: string) {
     if (savedTimers.current[moduleKey]) clearTimeout(savedTimers.current[moduleKey]);
     savedTimers.current[moduleKey] = setTimeout(() => {
@@ -455,8 +469,16 @@ export function SettingsWorkspace({ projectId }: { projectId: string }) {
           </AnimatePresence>
         </div>
 
-        {/* per-module fine-tuning, one family at a time at full width */}
+        {/* per-module fine-tuning, one family/tier at a time at full width */}
         <div>
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <ViewModeToggle value={viewMode} onChange={handleViewModeChange} />
+            <p className="hidden text-caption text-muted-soft sm:block">
+              {viewMode === "tier"
+                ? "按任务负载分组 — 同一档的功能对模型强度要求相近"
+                : "按功能归属分组 — 同一族的功能服务于同一环节"}
+            </p>
+          </div>
           <ModuleGroupTabs
             groups={groups}
             bindings={bindings}
