@@ -13,6 +13,7 @@ export const WRITER_RUNTIME_EVENT_TYPES = Object.freeze([
   "writer.retrieval_plan.completed",
   "writer.retrieval_plan.degraded",
   "writer.retrieval_plan.skipped",
+  "writer.always_on.injected",
   "writer.context_budget.trimmed",
   "writer.consistency.violations",
   "writer.consistency.clean",

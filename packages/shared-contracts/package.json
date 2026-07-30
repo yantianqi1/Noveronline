@@ -2,6 +2,7 @@
   "name": "@mirofish/shared-contracts",
   "version": "0.1.0",
   "private": true,
+  "license": "AGPL-3.0-only",
   "type": "module",
   "description": "Language-neutral runtime contracts for the MiroFish SaaS control plane and workers.",
   "files": [
