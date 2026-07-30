@@ -76,6 +76,57 @@ export type WriterRunState = {
 
 const TERMINAL: ReadonlySet<RunPhase> = new Set(["completed", "failed", "cancelled"]);
 
+/** Match the control plane's writer-run admission definition. */
+export function isActiveWriterRunStatus(status: string): boolean {
+  const normalized = status.trim().toLowerCase();
+  return normalized === "queued" || normalized === "running";
+}
+
+/** Rebuild the composer lock set from authoritative run details. */
+export function collectActiveWriterRunIds(
+  runs: readonly ({ run_id: string; status: string } | null)[],
+): ReadonlySet<string> {
+  return new Set(
+    runs
+      .filter((run): run is { run_id: string; status: string } => Boolean(run))
+      .filter((run) => isActiveWriterRunStatus(run.status))
+      .map((run) => run.run_id),
+  );
+}
+
+/**
+ * Reconcile an event-derived state with the run row's authoritative status.
+ * Older runs can be terminal in Postgres without retaining a matching public
+ * terminal event; they must still stop polling and unlock the composer.
+ */
+export function reconcileWriterRunStatus(state: WriterRunState, status: string | null): WriterRunState {
+  if (!status || state.isTerminal) return state;
+  const normalized = status.trim().toLowerCase();
+  const phase: RunPhase | null =
+    normalized === "completed"
+      ? "completed"
+      : normalized === "failed"
+        ? "failed"
+        : normalized === "cancelled" || normalized === "canceled"
+          ? "cancelled"
+          : null;
+  if (!phase) return state;
+
+  const terminalMessage =
+    phase === "failed"
+      ? state.terminalMessage ?? "这次起草没写成"
+      : phase === "cancelled"
+        ? "已停下"
+        : null;
+  return {
+    ...state,
+    phase,
+    statusLine: statusLineFor(phase, state.toolCount, state.candidateText, true, terminalMessage),
+    terminalMessage,
+    isTerminal: true,
+  };
+}
+
 export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
   let phase: RunPhase = "queued";
   let toolCount = 0;

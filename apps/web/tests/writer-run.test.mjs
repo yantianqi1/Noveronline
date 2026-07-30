@@ -1,7 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { reduceWriterRun } from "../lib/api/writer-run.ts";
+import {
+  collectActiveWriterRunIds,
+  isActiveWriterRunStatus,
+  reconcileWriterRunStatus,
+  reduceWriterRun,
+} from "../lib/api/writer-run.ts";
 
 let seq = 0;
 function ev(event_type, payload = {}) {
@@ -15,6 +20,44 @@ test("queued run with no events is not terminal", () => {
   assert.equal(state.isTerminal, false);
   assert.equal(state.candidateText, "");
   assert.equal(state.draftId, null);
+});
+
+test("only control-plane active statuses may lock the composer", () => {
+  assert.equal(isActiveWriterRunStatus("queued"), true);
+  assert.equal(isActiveWriterRunStatus("RUNNING"), true);
+  assert.equal(isActiveWriterRunStatus("completed"), false);
+  assert.equal(isActiveWriterRunStatus("failed"), false);
+  assert.equal(isActiveWriterRunStatus("cancelled"), false);
+});
+
+test("historical run reconstruction excludes every dead run from the composer lock", () => {
+  const active = collectActiveWriterRunIds([
+    { run_id: "old-completed", status: "completed" },
+    { run_id: "old-failed", status: "failed" },
+    { run_id: "old-cancelled", status: "cancelled" },
+    { run_id: "live-queued", status: "queued" },
+    { run_id: "live-running", status: "running" },
+    null,
+  ]);
+
+  assert.deepEqual([...active], ["live-queued", "live-running"]);
+});
+
+test("authoritative terminal status settles a historical run missing its terminal event", () => {
+  const eventState = reduceWriterRun([ev("writer.run.started")]);
+
+  const completed = reconcileWriterRunStatus(eventState, "completed");
+  assert.equal(completed.phase, "completed");
+  assert.equal(completed.isTerminal, true);
+
+  const failed = reconcileWriterRunStatus(eventState, "failed");
+  assert.equal(failed.phase, "failed");
+  assert.equal(failed.isTerminal, true);
+  assert.match(failed.statusLine, /未完成/);
+
+  const cancelled = reconcileWriterRunStatus(eventState, "cancelled");
+  assert.equal(cancelled.phase, "cancelled");
+  assert.equal(cancelled.isTerminal, true);
 });
 
 test("orchestrating phase counts tool calls and reports retrieval progress", () => {

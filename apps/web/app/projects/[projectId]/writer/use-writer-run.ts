@@ -9,7 +9,7 @@ import {
   fetchWriterRun,
   WriterError,
 } from "@/lib/api/writer-client";
-import { reduceWriterRun, type WriterRunState } from "@/lib/api/writer-run";
+import { reconcileWriterRunStatus, reduceWriterRun, type WriterRunState } from "@/lib/api/writer-run";
 import type { WriterEvent, WriterRun } from "@/lib/api/writer-types";
 
 /**
@@ -47,6 +47,7 @@ export function useWriterRun(
   const [events, setEvents] = useState<WriterEvent[]>([]);
   const [cancelling, setCancelling] = useState(false);
   const [draft, setDraft] = useState<LiveRun["draft"]>(null);
+  const [runStatus, setRunStatus] = useState<string | null>(null);
 
   const cursorRef = useRef<string | undefined>(undefined);
   const seenRef = useRef<Set<string>>(new Set());
@@ -56,7 +57,7 @@ export function useWriterRun(
   // Draft id the reducer has surfaced so far; the poll loop syncs it below.
   const draftIdRef = useRef<string | null>(null);
 
-  const state = reduceWriterRun(events);
+  const state = reconcileWriterRunStatus(reduceWriterRun(events), runStatus);
   draftIdRef.current = state.draftId;
 
   const poll = useCallback(async () => {
@@ -85,6 +86,7 @@ export function useWriterRun(
       // Reconcile authoritative status; stop polling once terminal.
       const detail: WriterRun = await fetchWriterRun(selection.project_id, selection.tenant_id, runId);
       if (stopRef.current) return;
+      setRunStatus(detail.status);
       const terminal = isTerminalStatus(detail.status);
       // Follow the saved draft: its status is the adoption source of truth for
       // a live turn, and the completed run's body text backs the settled card.
@@ -142,6 +144,7 @@ export function useWriterRun(
     seenRef.current = new Set();
     setEvents([]);
     setDraft(null);
+    setRunStatus(null);
     void poll();
     timerRef.current = setInterval(() => {
       void poll();

@@ -15,6 +15,7 @@ import {
   fetchChapters,
   fetchThreadMessages,
   fetchWriterDraft,
+  fetchWriterRun,
   readSelectionFor,
   startWriterRun,
   updateBlockText,
@@ -27,6 +28,7 @@ import type {
   ManuscriptBlockMeta,
   WriterThread,
 } from "@/lib/api/writer-types";
+import { collectActiveWriterRunIds } from "@/lib/api/writer-run";
 
 import { WriterCanvasTop, type CanvasView } from "./writer-canvas-top";
 import { WriterEmpty } from "./writer-empty";
@@ -218,6 +220,18 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
               // one task card per run (its steps/recall/candidate re-read from
               // the run's durable event stream), nothing lost across reloads.
               const historyTurns = buildConversationTurns(history);
+              const taskRunIds = historyTurns
+                .filter((turn): turn is Extract<ConversationTurn, { kind: "task" }> => turn.kind === "task")
+                .map((turn) => turn.runId);
+              const runDetails = await Promise.all(
+                taskRunIds.map((runId) =>
+                  fetchWriterRun(sel.project_id, sel.tenant_id, runId).catch(() => null),
+                ),
+              );
+              if (cancelled) return;
+              // Thread history proves that a run existed, not that it remains
+              // live. Only the authoritative run row may lock the composer.
+              setActiveRunIds(collectActiveWriterRunIds(runDetails));
               setTurns((current) => {
                 const ids = new Set(historyTurns.map((turn) => turn.id));
                 return [...historyTurns, ...current.filter((turn) => !ids.has(turn.id))];
@@ -226,13 +240,6 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
                 ...liveTurnIdsRef.current,
                 ...historyTurns.map((turn) => turn.id),
               ]);
-              setActiveRunIds(
-                new Set(
-                  historyTurns
-                    .filter((turn): turn is Extract<ConversationTurn, { kind: "task" }> => turn.kind === "task")
-                    .map((turn) => turn.runId),
-                ),
-              );
               messageSeqRef.current = history.length;
             })
             .catch(() => {
