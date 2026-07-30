@@ -58,6 +58,11 @@ apps/web/next-env.d.ts
 # Local Playwright browser install links
 .playwright-browsers/
 
+# One-off UI prototypes, acceptance scripts, and generated screenshots
+/tools/ui-preview/live-acceptance/
+/tools/ui-preview/worldline-demos/
+/tools/ui-preview/verify-worldline-*.mjs
+
 # Local Go build output
 /apps/api/api
 
