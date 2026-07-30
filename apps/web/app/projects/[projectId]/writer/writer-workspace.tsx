@@ -32,7 +32,7 @@ import { collectActiveWriterRunIds } from "@/lib/api/writer-run";
 
 import { WriterCanvasTop, type CanvasView } from "./writer-canvas-top";
 import { WriterEmpty } from "./writer-empty";
-import { ManuscriptPaper } from "./manuscript-paper";
+import { ManuscriptPaper, type PaperSelection, type SelectionActionKind } from "./manuscript-paper";
 import { ChaptersStructurePanel } from "./chapters-structure-panel";
 import { ReviewPanel } from "./review-panel";
 import { ToolsPanel } from "./tools-panel";
@@ -529,6 +529,15 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
     });
   }
 
+  /**
+   * A quick action picked on a highlighted passage. Builds one instruction that
+   * carries the verb plus the exact selected text, then runs the same draft
+   * path as a typed message — the candidate still lands in the rail to adopt.
+   */
+  function handleSelectionAction(kind: SelectionActionKind, sel: PaperSelection) {
+    handleSend(buildSelectionInstruction(kind, sel.text));
+  }
+
   /** A live turn discovered its draft is adopted — pin the settled state. */
   function handleTaskAdopted(runId: string) {
     setAdoptedRunIds((prev) => {
@@ -794,6 +803,7 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
                 readOnly={!csrfToken}
                 revealBlockId={revealBlockId}
                 onRevealConsumed={() => setRevealBlockId(null)}
+                onSelectionAction={handleSelectionAction}
               />
             )}
           </div>
@@ -806,6 +816,27 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
 function countWords(text: string): number {
   // Chinese prose counts characters, not whitespace-separated tokens.
   return text.replace(/\s/g, "").length;
+}
+
+const SELECTION_VERBS: Record<SelectionActionKind, string> = {
+  rewrite: "改写",
+  continue: "续写",
+  polish: "润色",
+  expand: "扩写",
+};
+
+/**
+ * Compose the run instruction for a selection quick action. The selected text
+ * is quoted verbatim so the co-writer knows exactly which passage to work on;
+ * the candidate comes back through the normal draft → adopt flow.
+ */
+function buildSelectionInstruction(kind: SelectionActionKind, selectedText: string): string {
+  const verb = SELECTION_VERBS[kind];
+  const trimmed = selectedText.trim();
+  if (kind === "continue") {
+    return `请接着下面这段文字续写下去，保持同样的语气、视角和节奏，自然衔接：\n\n「${trimmed}」`;
+  }
+  return `请${verb}下面这段文字，保持原有意思和上下文连贯：\n\n「${trimmed}」`;
 }
 
 function NoSelection({ onBack }: { onBack: () => void }) {

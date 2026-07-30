@@ -17,12 +17,15 @@ export function ConversationReviewFlip({
   tenantId,
   /** Bump to re-fetch the count + queue (e.g. after a draft adoption). */
   refreshKey,
+  /** True while post-adoption distillation is still being polled for. */
+  distilling = false,
   conversation,
   review,
 }: {
   projectId: string;
   tenantId: string;
   refreshKey: number;
+  distilling?: boolean;
   conversation: (reviewTrigger: ReactNode) => ReactNode;
   review: (onCountChange: (count: number) => void) => ReactNode;
 }) {
@@ -82,6 +85,9 @@ export function ConversationReviewFlip({
           </DockTab>
           <DockTab active={flipped} onClick={() => setFlipped(true)}>
             待审资产
+            {distilling && pendingCount === 0 ? (
+              <span className="font-mono text-micro leading-4 text-muted tabular-nums">蒸馏中</span>
+            ) : null}
             {pendingCount > 0 ? (
               <span
                 key={pendingCount}

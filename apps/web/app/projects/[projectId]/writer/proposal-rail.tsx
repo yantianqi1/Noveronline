@@ -32,6 +32,8 @@ export function ProposalRail({
   csrfToken,
   /** Bump to re-fetch (e.g. after a draft adoption enqueues new candidates). */
   refreshKey,
+  /** True while the post-adoption distillation watch is still open. */
+  distilling = false,
   /** Called whenever the pending list changes, so the trigger badge stays in sync. */
   onCountChange,
 }: {
@@ -39,6 +41,7 @@ export function ProposalRail({
   tenantId: string;
   csrfToken: string | null;
   refreshKey: number;
+  distilling?: boolean;
   onCountChange?: (count: number) => void;
 }) {
   const [proposals, setProposals] = useState<AssetProposal[] | null>(null);
@@ -176,7 +179,7 @@ export function ProposalRail({
         {proposals === null ? (
           <QueueSkeleton />
         ) : proposals.length === 0 ? (
-          <EmptyQueue />
+          <EmptyQueue distilling={distilling} />
         ) : (
           <ul className="flex flex-col gap-2">
             {proposals.map((p) => (
@@ -228,8 +231,22 @@ function QueueSkeleton() {
   );
 }
 
-/** An empty queue reads as a resolved state, not a blank hole. */
-function EmptyQueue() {
+/** An empty queue reads as a resolved state, not a blank hole — unless
+ *  distillation is still running after 采用, in which case waiting is honest. */
+function EmptyQueue({ distilling }: { distilling: boolean }) {
+  if (distilling) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center rounded-panel border border-dashed border-line-soft bg-panel/50 px-4 py-6 text-center">
+        <span className="grid size-9 place-items-center rounded-full bg-accent-wash text-accent">
+          <Sparkles className="size-4 animate-pulse" aria-hidden />
+        </span>
+        <p className="mt-2.5 text-sm font-medium text-ink">正在从正文蒸馏资产</p>
+        <p className="mt-1 max-w-[240px] text-caption leading-relaxed text-muted">
+          采用后会自动抽取人物、设定与关系，通常需要半分钟到几分钟。完成后会出现在这里，点头之前不会进资产库。
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="flex h-full flex-col items-center justify-center rounded-panel border border-dashed border-line-soft bg-panel/50 px-4 py-6 text-center">
       <span className="grid size-9 place-items-center rounded-full bg-success-wash text-success">

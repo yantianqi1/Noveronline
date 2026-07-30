@@ -35,6 +35,7 @@ test("writer switches the complete conversation dock between 对话/待审资产
   assert.match(flip, /aria-selected=\{active\}/);
   assert.match(flip, /rounded-full bg-paper-deep px-1\.5 font-mono text-micro/);
   assert.match(flip, /size-1\.5 rounded-full bg-accent/);
+  assert.match(flip, /蒸馏中/);
   assert.match(flip, /<kbd className="kbd ml-auto">⌘J<\/kbd>/);
   assert.match(flip, /transition-opacity/);
   assert.match(flip, /conversation\(null\)/);
@@ -42,4 +43,11 @@ test("writer switches the complete conversation dock between 对话/待审资产
   assert.doesNotMatch(flip, /返回合著者/);
   assert.doesNotMatch(flip, /bg-candidate/);
   assert.equal(flip.match(/onClick=\{\(\) => setFlipped\(false\)\}/g)?.length, 1);
+
+  // Adoption must poll for distillation candidates — a single 12s refresh is
+  // far shorter than real LLM extract latency (often 30–180s).
+  assert.match(workspace, /startDistillWatch/);
+  assert.match(workspace, /240_000/);
+  assert.match(workspace, /5_000/);
+  assert.doesNotMatch(workspace, /12_000/);
 });
