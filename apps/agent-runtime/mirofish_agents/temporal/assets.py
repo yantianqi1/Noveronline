@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 from mirofish_agents.common.context import AgentContext
 from mirofish_agents.common.http import read_response_limited, response_limit_from_env
@@ -37,6 +38,25 @@ ASSET_ACTIVITY_RETRY_POLICY = RetryPolicy(
 ASSET_INGESTION_MODULE_KEY = "asset_ingestion"
 STYLE_EXTRACTION_MODULE_KEY = "style_extractor"
 ASSET_REINDEX_MODULE_KEY = "asset_reindex"
+_ASSET_NON_RETRYABLE_CODES = {
+    "VALIDATION_FAILED",
+    "FORBIDDEN",
+    "ASSET_INGESTION_RUNNER_UNCONFIGURED",
+    "STYLE_EXTRACTION_RUNNER_UNCONFIGURED",
+    "ASSET_REINDEXER_UNCONFIGURED",
+    "LLM_MODULE_UNBOUND",
+    "LLM_MODULE_CAPABILITY_MISSING",
+    "LLM_CREDENTIAL_KEY_UNCONFIGURED",
+    "LLM_CREDENTIAL_UNAVAILABLE",
+    "LLM_CREDENTIAL_QUERY_FAILED",
+    "LLM_CREDENTIAL_DECRYPT_FAILED",
+    "SCHEMA_VALIDATION_FAILED",
+    "LLM_RESPONSE_SCHEMA_INVALID",
+    "LLM_QUOTA_TOKENS_EXCEEDED",
+    "LLM_QUOTA_COST_EXCEEDED",
+    "LLM_QUOTA_CONCURRENCY_EXCEEDED",
+    "LLM_PROVIDER_USAGE_MISSING",
+}
 SENSITIVE_ASSET_KEYS = {
     "api_key",
     "body",
@@ -1913,6 +1933,11 @@ def _uuid_or_none(value: str | None) -> str | None:
         return None
 
 
+def _raise_transient_activity_error(payload: dict[str, Any], code: str, message: str) -> None:
+    if payload.get("_temporal_retry_transient") and code not in _ASSET_NON_RETRYABLE_CODES:
+        raise ApplicationError(message, type=code, non_retryable=False)
+
+
 @activity.defn
 def style_extraction_activity(
     payload: dict[str, Any],
@@ -1985,6 +2010,7 @@ def style_extraction_activity(
             options=_sanitize_asset_value(options),
         )
     except Exception:
+        _raise_transient_activity_error(payload, "LLM_PROVIDER_ERROR", "style extraction runner failed")
         return _failed_style_extraction_result(
             base=base,
             context=context,
@@ -1996,6 +2022,7 @@ def style_extraction_activity(
     if extraction_result.get("status") != "completed":
         error = extraction_result.get("error") if isinstance(extraction_result.get("error"), dict) else {}
         code = error.get("code") if isinstance(error.get("code"), str) else "LLM_PROVIDER_ERROR"
+        _raise_transient_activity_error(payload, code, _public_style_extraction_error_message(code))
         return _failed_style_extraction_result(
             base=base,
             context=context,
@@ -2114,6 +2141,7 @@ def asset_ingestion_activity(
             options=options,
         )
     except Exception:
+        _raise_transient_activity_error(payload, "LLM_PROVIDER_ERROR", "asset ingestion runner failed")
         return _failed_asset_ingestion_result(
             base=base,
             context=context,
@@ -2125,6 +2153,7 @@ def asset_ingestion_activity(
     if ingestion_result.get("status") != "completed":
         error = ingestion_result.get("error") if isinstance(ingestion_result.get("error"), dict) else {}
         code = error.get("code") if isinstance(error.get("code"), str) else "LLM_PROVIDER_ERROR"
+        _raise_transient_activity_error(payload, code, _public_asset_ingestion_error_message(code))
         return _failed_asset_ingestion_result(
             base=base,
             context=context,
@@ -2237,6 +2266,7 @@ def asset_reindex_activity(
             options=_sanitize_asset_value(options),
         )
     except LLMFacilityError as exc:
+        _raise_transient_activity_error(payload, exc.code, exc.message)
         return _failed_asset_reindex_result(
             base=base,
             context=context,
@@ -2247,6 +2277,7 @@ def asset_reindex_activity(
             workflow_status_writer=status_writer,
         )
     except Exception:
+        _raise_transient_activity_error(payload, "ASSET_REINDEX_FAILED", "asset reindexer failed")
         return _failed_asset_reindex_result(
             base=base,
             context=context,
@@ -2259,6 +2290,7 @@ def asset_reindex_activity(
     if reindex_result.get("status") != "completed":
         error = reindex_result.get("error") if isinstance(reindex_result.get("error"), dict) else {}
         code = error.get("code") if isinstance(error.get("code"), str) else "ASSET_REINDEX_FAILED"
+        _raise_transient_activity_error(payload, code, _public_asset_reindex_error_message(code))
         return _failed_asset_reindex_result(
             base=base,
             context=context,
@@ -2367,7 +2399,7 @@ class AssetIngestionWorkflow:
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await workflow.execute_activity(
             asset_ingestion_activity,
-            payload,
+            {**payload, "_temporal_retry_transient": True},
             start_to_close_timeout=timedelta(minutes=20),
             retry_policy=ASSET_ACTIVITY_RETRY_POLICY,
         )
@@ -2379,7 +2411,7 @@ class StyleExtractionWorkflow:
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await workflow.execute_activity(
             style_extraction_activity,
-            payload,
+            {**payload, "_temporal_retry_transient": True},
             start_to_close_timeout=timedelta(minutes=20),
             retry_policy=ASSET_ACTIVITY_RETRY_POLICY,
         )
@@ -2391,7 +2423,7 @@ class AssetReindexWorkflow:
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await workflow.execute_activity(
             asset_reindex_activity,
-            payload,
+            {**payload, "_temporal_retry_transient": True},
             start_to_close_timeout=timedelta(minutes=20),
             retry_policy=ASSET_ACTIVITY_RETRY_POLICY,
         )

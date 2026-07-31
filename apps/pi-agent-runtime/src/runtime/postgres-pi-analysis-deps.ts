@@ -24,6 +24,12 @@ import {
   normalizeAnalysisCandidateType,
 } from "./analysis-asset-mapping.js";
 import { effectiveModelCapabilities } from "../llm/model-capabilities.js";
+import { createPostgresQuotaStore } from "../llm/quota/postgres-quota-store.js";
+import { usageCostMicros, validateProviderUsage } from "../llm/quota/provider-call.js";
+import {
+  acquireLLMLease as acquirePostgresLLMLease,
+  releaseLLMLease as releasePostgresLLMLease
+} from "./postgres-pi-writer-deps.js";
 
 const ANALYSIS_WORKFLOW_TYPE = "analysis_run";
 const MAX_WORKSPACE_TEXT_BYTES = 512 * 1024;
@@ -38,9 +44,43 @@ export interface PostgresPiAnalysisDepsOptions {
 
 export function createPostgresPiAnalysisDeps(options: PostgresPiAnalysisDepsOptions): PiAnalysisDeps {
   const db = options.db;
+  const quota = createPostgresQuotaStore(db);
   return {
     resolveModuleBinding: async (request) => resolveModuleBinding(db, request),
     resolveCredential: async (request) => resolveCredential(options, request),
+    acquireLLMLease: async (request) => {
+      const lease = await acquirePostgresLLMLease(db, request, 300);
+      return {
+        lease_id: lease.lease_id,
+        release: async () => releasePostgresLLMLease(db, { ...request, ...lease })
+      };
+    },
+    reserveQuota: async (request) => {
+      const reservation = await quota.reserve(request);
+      return {
+        reservation_id: reservation.reservation_id,
+        status: reservation.status,
+        finalize: async (usage) => {
+          const normalized = validateProviderUsage(usage);
+          await quota.finalize({
+            tenant_id: request.tenant_id,
+            project_id: request.project_id,
+            reservation_id: reservation.reservation_id,
+            provider_call_id: request.provider_call_id,
+            prompt_tokens: normalized.prompt_tokens,
+            completion_tokens: normalized.completion_tokens,
+            actual_cost_micros: usageCostMicros(normalized, request.pricing_status),
+            pricing_status: request.pricing_status
+          });
+        },
+        release: async () => quota.release({
+          tenant_id: request.tenant_id,
+          project_id: request.project_id,
+          reservation_id: reservation.reservation_id,
+          provider_call_id: request.provider_call_id
+        })
+      };
+    },
     writeWorkspaceFile: async (input) => writeWorkspaceFile(db, input),
     listWorkspaceFiles: async (input) => listWorkspaceFiles(db, input),
     listSourceSegments: async (input) => listSourceSegments(db, input),
@@ -129,12 +169,6 @@ SELECT module_key, channel_id::text AS channel_id, model_id,
     settings_jsonb?: unknown;
   };
   let row: BindingRow | undefined = result.rows[0] as BindingRow | undefined;
-  // Compatibility: if analysis modules were never batch-bound, reuse an existing
-  // chat-capable donor binding (writer/sequential/etc.) for this resolve only.
-  // Go admission also persists real analysis bindings when possible.
-  if (!row) {
-    row = await resolveAnalysisDonorBinding(db, request);
-  }
   if (!row) {
     throw Object.assign(new Error(`LLM_MODULE_UNBOUND: ${request.module_key} module is not bound`), {
       code: "LLM_MODULE_UNBOUND"
@@ -165,86 +199,6 @@ SELECT module_key, channel_id::text AS channel_id, model_id,
       ? row.settings_jsonb as Record<string, unknown>
       : {}
   };
-}
-
-const ANALYSIS_DONOR_KEYS = [
-  "analysis_planner",
-  "analysis_worker",
-  "writer_orchestrator",
-  "writer_composer",
-  "sequential_reading",
-  "story_ontology",
-  "contextual_block_analysis",
-  "writer_reviewer",
-  "worldline_director"
-] as const;
-
-async function resolveAnalysisDonorBinding(
-  db: QueryExecutor,
-  request: ResolveAnalysisModuleRequest
-): Promise<{
-  module_key?: unknown;
-  channel_id?: unknown;
-  model_id?: unknown;
-  provider?: unknown;
-  base_url?: unknown;
-  credential_ref?: unknown;
-  supports_tools?: unknown;
-  supports_json?: unknown;
-  settings_jsonb?: unknown;
-} | undefined> {
-  const result = await queryWithTenant(db, request, `
-SELECT module_key, channel_id::text AS channel_id, model_id,
-       provider, base_url, channel_id::text AS credential_ref,
-       supports_tools, supports_json, settings_jsonb, binding_rank, preference_rank
-  FROM (
-    SELECT b.module_key, b.channel_id, b.model_id,
-           c.provider, c.base_url,
-           COALESCE(m.supports_tools, false) AS supports_tools,
-           COALESCE(m.supports_json, false) AS supports_json,
-           b.settings_jsonb,
-           CASE WHEN b.project_id = $2 THEN 0 ELSE 1 END AS binding_rank,
-           CASE b.module_key
-             WHEN 'analysis_planner' THEN 0
-             WHEN 'analysis_worker' THEN 1
-             WHEN 'writer_orchestrator' THEN 2
-             WHEN 'writer_composer' THEN 3
-             WHEN 'sequential_reading' THEN 4
-             WHEN 'story_ontology' THEN 5
-             WHEN 'contextual_block_analysis' THEN 6
-             WHEN 'writer_reviewer' THEN 7
-             WHEN 'worldline_director' THEN 8
-             ELSE 50
-           END AS preference_rank
-      FROM llm_module_bindings b
-      JOIN llm_channels c
-        ON c.channel_id = b.channel_id
-       AND c.enabled = TRUE
-       AND (c.tenant_id = b.tenant_id OR c.tenant_id IS NULL)
-      JOIN llm_models m
-        ON m.channel_id = b.channel_id
-       AND m.model_id = b.model_id
-       AND (m.tenant_id = b.tenant_id OR m.tenant_id IS NULL)
-       AND m.enabled = TRUE
-     WHERE b.tenant_id = $1
-       AND (b.project_id = $2 OR b.project_id IS NULL)
-       AND b.module_key = ANY($3::text[])
-  ) ranked_bindings
- ORDER BY preference_rank, binding_rank
- LIMIT 1`, [request.tenant_id, request.project_id, [...ANALYSIS_DONOR_KEYS]]);
-  return result.rows[0] as
-    | {
-      module_key?: unknown;
-      channel_id?: unknown;
-      model_id?: unknown;
-      provider?: unknown;
-      base_url?: unknown;
-      credential_ref?: unknown;
-      supports_tools?: unknown;
-      supports_json?: unknown;
-      settings_jsonb?: unknown;
-    }
-    | undefined;
 }
 
 async function resolveCredential(

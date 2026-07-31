@@ -10,6 +10,7 @@ import {
 import { validateAnalysisWorkflowPayload } from "../contracts/analysis-worker-spec.js";
 import { ApplicationFailure } from "@temporalio/activity";
 import { extractAnalysisCandidatesFromWorkspaceFiles } from "../runtime/analysis-candidate-extract.js";
+import { providerCallBudget, type PricingStatus } from "../llm/quota/provider-call.js";
 
 export interface PiAnalysisActivityResult {
   tenant_id: string;
@@ -110,6 +111,7 @@ export interface PiAnalysisDeps {
     module_key: string;
     channel_id: string;
     model_id: string;
+    module_max_concurrency?: number;
   }): Promise<{ lease_id: string; release(): Promise<void> }>;
   reserveQuota?(request: {
     tenant_id: string;
@@ -117,8 +119,18 @@ export interface PiAnalysisDeps {
     run_id: string;
     module_key: string;
     provider_call_id: string;
-    estimated_tokens: number;
-  }): Promise<{ reservation_id: string; finalize(usage: PiAnalysisUsage): Promise<void> }>;
+    channel_id: string;
+    model_id: string;
+    reserved_tokens: number;
+    reserved_cost_micros: number;
+    pricing_status: PricingStatus;
+    ttl_seconds: number;
+  }): Promise<{
+    reservation_id: string;
+    status: "reserved" | "finalized";
+    finalize(usage: PiAnalysisUsage): Promise<void>;
+    release(): Promise<void>;
+  }>;
   runAnalysisStage?(request: AnalysisStageRequest): Promise<AnalysisStageResult>;
   executeAnalysisTool?(request: AnalysisToolRequest): Promise<Record<string, unknown>>;
   writeWorkspaceFile?(input: WorkspaceFileWriteInput): Promise<WorkspaceFileRecord>;
@@ -478,7 +490,7 @@ async function runStage(
   usage: PiAnalysisUsage,
   record: (event_type: string, payload: Record<string, unknown>, key?: string) => Promise<void>
 ): Promise<void> {
-  if (!deps.resolveModuleBinding || !deps.runAnalysisStage) {
+  if (!deps.resolveModuleBinding || !deps.resolveCredential || !deps.acquireLLMLease || !deps.reserveQuota || !deps.runAnalysisStage) {
     throw Object.assign(
       new Error("ANALYSIS_RUNTIME_UNCONFIGURED: Pi analysis worker is missing LLM stage execution"),
       { code: "ANALYSIS_RUNTIME_UNCONFIGURED" }
@@ -494,7 +506,7 @@ async function runStage(
     run_id: input.run_id,
     module_key: moduleKey
   });
-  const credential = await deps.resolveCredential?.({
+  const credential = await deps.resolveCredential({
     tenant_id: input.tenant_id,
     project_id: input.project_id,
     run_id: input.run_id,
@@ -508,23 +520,39 @@ async function runStage(
     });
   }
   const providerCallId = analysisProviderCallId(input, moduleKey);
-  const lease = await deps.acquireLLMLease?.({
-    tenant_id: input.tenant_id,
-    project_id: input.project_id,
-    run_id: input.run_id,
-    module_key: moduleKey,
-    channel_id: resolution.channel_id,
-    model_id: resolution.model_id
-  });
-  const reservation = await deps.reserveQuota?.({
-    tenant_id: input.tenant_id,
-    project_id: input.project_id,
-    run_id: input.run_id,
-    module_key: moduleKey,
-    provider_call_id: providerCallId,
-    estimated_tokens: 128_000
-  });
+  let lease: Awaited<ReturnType<NonNullable<PiAnalysisDeps["acquireLLMLease"]>>> | undefined;
+  let reservation: Awaited<ReturnType<NonNullable<PiAnalysisDeps["reserveQuota"]>>> | undefined;
+  let failure: unknown;
+  let finalized = false;
   try {
+    const budget = providerCallBudget(resolution.settings);
+    lease = await deps.acquireLLMLease({
+      tenant_id: input.tenant_id,
+      project_id: input.project_id,
+      run_id: input.run_id,
+      module_key: moduleKey,
+      channel_id: resolution.channel_id,
+      model_id: resolution.model_id,
+      module_max_concurrency: positiveIntegerSetting(resolution.settings, "max_concurrency")
+    });
+    reservation = await deps.reserveQuota({
+      tenant_id: input.tenant_id,
+      project_id: input.project_id,
+      run_id: input.run_id,
+      module_key: moduleKey,
+      provider_call_id: providerCallId,
+      channel_id: resolution.channel_id,
+      model_id: resolution.model_id,
+      reserved_tokens: budget.reserved_tokens,
+      reserved_cost_micros: budget.reserved_cost_micros,
+      pricing_status: budget.pricing_status,
+      ttl_seconds: positiveIntegerSetting(resolution.settings, "quota_reservation_ttl_seconds") ?? 900
+    });
+    if (reservation.status === "finalized") {
+      throw Object.assign(new Error("LLM_PROVIDER_CALL_ALREADY_FINALIZED: analysis provider call requires recovery"), {
+        code: "LLM_PROVIDER_CALL_ALREADY_FINALIZED"
+      });
+    }
     const stage = await deps.runAnalysisStage({
       tenant_id: input.tenant_id,
       project_id: input.project_id,
@@ -584,25 +612,53 @@ async function runStage(
       }
     });
     mergeUsage(usage, stage.usage);
-    if (stage.usage) {
-      await reservation?.finalize(stage.usage);
+    if (!stage.usage) {
+      throw Object.assign(new Error("LLM_PROVIDER_USAGE_MISSING: analysis provider did not return usage"), {
+        code: "LLM_PROVIDER_USAGE_MISSING"
+      });
     }
+    await reservation.finalize(stage.usage);
+    finalized = true;
     await record("analysis.stage.completed", {
       stage: moduleKey,
       status: "completed",
       summary: stage.summary.slice(0, 500)
     }, `stage:${moduleKey}:completed`);
   } catch (error) {
+    failure = error;
     await record("analysis.stage.failed", {
       stage: moduleKey,
       status: "failed",
       error_code: errorCode(error),
       message: errorMessage(error)
     }, `stage:${moduleKey}:failed`);
-    throw error;
   } finally {
-    await lease?.release();
+    const cleanupErrors: unknown[] = [];
+    if (reservation?.status === "reserved" && !finalized) {
+      try {
+        await reservation.release();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (lease) {
+      try {
+        await lease.release();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (failure && cleanupErrors.length > 0) {
+      throw new AggregateError([failure, ...cleanupErrors], "analysis stage failed during cleanup");
+    }
+    if (failure) throw failure;
+    if (cleanupErrors.length > 0) throw cleanupErrors[0];
   }
+}
+
+function positiveIntegerSetting(settings: Record<string, unknown>, key: string): number | undefined {
+  const value = settings[key];
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 function analysisProviderCallId(input: AnalysisRunInput, moduleKey: string): string {

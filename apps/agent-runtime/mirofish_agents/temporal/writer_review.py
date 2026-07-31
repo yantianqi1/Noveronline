@@ -10,6 +10,7 @@ from uuid import UUID
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 from mirofish_agents.common.context import AgentContext
 from mirofish_agents.seed.sequential_reader import (
@@ -33,6 +34,26 @@ WRITER_REVIEW_ACTIVITY_RETRY_POLICY = RetryPolicy(
     maximum_interval=timedelta(minutes=1),
     maximum_attempts=3,
 )
+
+_WRITER_REVIEW_NON_RETRYABLE_CODES = {
+    "VALIDATION_FAILED",
+    "FORBIDDEN",
+    "WRITER_REVIEW_BACKEND_UNCONFIGURED",
+    "LLM_MODULE_UNBOUND",
+    "LLM_CREDENTIAL_KEY_UNCONFIGURED",
+    "LLM_CREDENTIAL_UNAVAILABLE",
+    "LLM_CREDENTIAL_QUERY_FAILED",
+    "LLM_CREDENTIAL_DECRYPT_FAILED",
+    "LLM_RESPONSE_SCHEMA_INVALID",
+    "SCHEMA_VALIDATION_FAILED",
+    "LLM_QUOTA_POLICY_UNAVAILABLE",
+    "LLM_QUOTA_PRICING_UNAVAILABLE",
+    "LLM_QUOTA_TOKENS_EXCEEDED",
+    "LLM_QUOTA_COST_EXCEEDED",
+    "LLM_QUOTA_CONCURRENCY_EXCEEDED",
+    "LLM_PROVIDER_USAGE_MISSING",
+    "LLM_PROVIDER_CALL_CONFLICT",
+}
 
 _SEVERITIES = {"low", "medium", "high", "critical"}
 _CATEGORIES = {
@@ -605,6 +626,8 @@ def writer_review_activity(payload: dict[str, Any], runner: WriterReviewRunner |
         return {**context.to_trace_payload(), **runner.run_review(context=context, review_id=review_id, draft_id=draft_id)}
     except Exception as exc:
         code, message = _stable_error(exc)
+        if payload.get("_temporal_retry_transient") and code not in _WRITER_REVIEW_NON_RETRYABLE_CODES:
+            raise ApplicationError(message, type=code, non_retryable=False) from exc
         return {"status": "failed", "stage": "writer_review", "module_key": WRITER_REVIEW_MODULE_KEY, "error": {"code": code, "message": message}}
 
 
@@ -614,7 +637,7 @@ class WriterReviewWorkflow:
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await workflow.execute_activity(
             writer_review_activity,
-            payload,
+            {**payload, "_temporal_retry_transient": True},
             start_to_close_timeout=timedelta(minutes=15),
             schedule_to_close_timeout=timedelta(hours=1),
             retry_policy=WRITER_REVIEW_ACTIVITY_RETRY_POLICY,

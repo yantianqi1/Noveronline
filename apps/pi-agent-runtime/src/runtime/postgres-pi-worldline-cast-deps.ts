@@ -14,6 +14,12 @@ import {
 import { worldlineCastRuntimeContextFromInput } from "../contracts/worldline-cast-run.js";
 import { assertWorldlineCastToolAllowed } from "../tools/worldline-cast-permissions.js";
 import { effectiveModelCapabilities } from "../llm/model-capabilities.js";
+import { createPostgresQuotaStore } from "../llm/quota/postgres-quota-store.js";
+import { usageCostMicros, validateProviderUsage } from "../llm/quota/provider-call.js";
+import {
+  acquireLLMLease as acquirePostgresLLMLease,
+  releaseLLMLease as releasePostgresLLMLease
+} from "./postgres-pi-writer-deps.js";
 import type { CredentialDecryptor, QueryExecutor } from "./postgres-pi-writer-deps.js";
 
 const GOAL_START_WORKFLOW_TYPE = "worldline_goal_start";
@@ -25,9 +31,43 @@ export interface PostgresPiWorldlineCastDepsOptions {
 
 export function createPostgresPiWorldlineCastDeps(options: PostgresPiWorldlineCastDepsOptions): PiWorldlineCastDeps {
   const db = options.db;
+  const quota = createPostgresQuotaStore(db);
   return {
     resolveModuleBinding: async (request) => resolveModuleBinding(db, request),
     resolveCredential: async (request) => resolveCredential(options, request),
+    acquireLLMLease: async (request) => {
+      const lease = await acquirePostgresLLMLease(db, request, 300);
+      return {
+        lease_id: lease.lease_id,
+        release: async () => releasePostgresLLMLease(db, { ...request, ...lease })
+      };
+    },
+    reserveQuota: async (request) => {
+      const reservation = await quota.reserve(request);
+      return {
+        reservation_id: reservation.reservation_id,
+        status: reservation.status,
+        finalize: async (usage) => {
+          const normalized = validateProviderUsage(usage);
+          await quota.finalize({
+            tenant_id: request.tenant_id,
+            project_id: request.project_id,
+            reservation_id: reservation.reservation_id,
+            provider_call_id: request.provider_call_id,
+            prompt_tokens: normalized.prompt_tokens,
+            completion_tokens: normalized.completion_tokens,
+            actual_cost_micros: usageCostMicros(normalized, request.pricing_status),
+            pricing_status: request.pricing_status
+          });
+        },
+        release: async () => quota.release({
+          tenant_id: request.tenant_id,
+          project_id: request.project_id,
+          reservation_id: reservation.reservation_id,
+          provider_call_id: request.provider_call_id
+        })
+      };
+    },
     executeCastTool: async (request) => executeCastTool(db, request),
     commitCast: async (request) => commitCast(db, request),
     getCommittedCast: async (request) => getCommittedCast(db, request),

@@ -9,6 +9,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 from mirofish_agents.common.context import AgentContext
 from mirofish_agents.seed.sequential_reader import (
@@ -31,6 +32,21 @@ WORLDLINE_PREPARE_ACTIVITY_RETRY_POLICY = RetryPolicy(
     maximum_interval=timedelta(minutes=1),
     maximum_attempts=3,
 )
+
+_WORLDLINE_PREPARE_NON_RETRYABLE_CODES = {
+    "VALIDATION_FAILED",
+    "FORBIDDEN",
+    "WORLDLINE_PREPARE_RUNNER_UNCONFIGURED",
+    "LLM_MODULE_UNBOUND",
+    "LLM_CREDENTIAL_KEY_UNCONFIGURED",
+    "LLM_CREDENTIAL_UNAVAILABLE",
+    "LLM_CREDENTIAL_QUERY_FAILED",
+    "LLM_CREDENTIAL_DECRYPT_FAILED",
+    "LLM_MODULE_CAPABILITY_MISSING",
+    "SCHEMA_VALIDATION_FAILED",
+    "WORLDLINE_PREPARATION_SELECTION_INVALID",
+    "WORLDLINE_PREPARATION_NOT_ACTIVE",
+}
 
 _SENSITIVE_KEYS = {
     "api_key",
@@ -872,16 +888,27 @@ def worldline_prepare_activity(
     try:
         result = prepare_runner.run_prepare(context=context, prepare_id=normalized_prepare_id)
     except LLMFacilityError as exc:
+        if payload.get("_temporal_retry_transient") and exc.code not in _WORLDLINE_PREPARE_NON_RETRYABLE_CODES:
+            raise ApplicationError(exc.message, type=exc.code, non_retryable=False) from exc
         result = _failed(exc.code, exc.message)
     except Exception:
+        if payload.get("_temporal_retry_transient"):
+            raise ApplicationError("worldline prepare runner failed", type="WORLDLINE_PREPARE_FAILED", non_retryable=False)
         result = _failed("WORLDLINE_PREPARE_FAILED", "worldline prepare runner failed")
     if not isinstance(result, dict) or result.get("status") == "failed":
         error = result.get("error") if isinstance(result, dict) and isinstance(result.get("error"), dict) else {}
+        error_code = _optional_text(error.get("code")) or "WORLDLINE_PREPARE_FAILED"
+        if payload.get("_temporal_retry_transient") and error_code not in _WORLDLINE_PREPARE_NON_RETRYABLE_CODES:
+            raise ApplicationError(
+                _safe_error_message(error_code, _optional_text(error.get("message")) or "worldline prepare runner failed"),
+                type=error_code,
+                non_retryable=False,
+            )
         return _activity_failed(
             base=base,
             context=context,
             prepare_id=normalized_prepare_id,
-            code=_optional_text(error.get("code")) or "WORLDLINE_PREPARE_FAILED",
+            code=error_code,
             message=_safe_error_message(
                 _optional_text(error.get("code")) or "WORLDLINE_PREPARE_FAILED",
                 _optional_text(error.get("message")) or "worldline prepare runner failed",
@@ -937,7 +964,7 @@ class WorldlinePrepareWorkflow:
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await workflow.execute_activity(
             worldline_prepare_activity,
-            payload,
+            {**payload, "_temporal_retry_transient": True},
             start_to_close_timeout=timedelta(minutes=30),
             schedule_to_close_timeout=timedelta(hours=3),
             retry_policy=WORLDLINE_PREPARE_ACTIVITY_RETRY_POLICY,

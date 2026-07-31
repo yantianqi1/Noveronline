@@ -1834,7 +1834,7 @@ async function executeSearchManuscript(
   };
 }
 
-async function acquireLLMLease(db: QueryExecutor, request: AcquireLLMLeaseRequest, ttlSeconds: number): Promise<LLMLease> {
+export async function acquireLLMLease(db: QueryExecutor, request: AcquireLLMLeaseRequest, ttlSeconds: number): Promise<LLMLease> {
   await deleteExpiredLocks(db, request, "llm_channel", request.channel_id);
   const capacityResult = await queryWithTenantContext<{ max_concurrency?: number | string }>(
     db,
@@ -1897,7 +1897,7 @@ async function acquireLLMLease(db: QueryExecutor, request: AcquireLLMLeaseReques
   };
 }
 
-async function releaseLLMLease(db: QueryExecutor, request: ReleaseLLMLeaseRequest): Promise<void> {
+export async function releaseLLMLease(db: QueryExecutor, request: ReleaseLLMLeaseRequest): Promise<void> {
   if (request.locks?.length) {
     for (const lock of request.locks) {
       await releaseLock(db, request, lock.lease_id);

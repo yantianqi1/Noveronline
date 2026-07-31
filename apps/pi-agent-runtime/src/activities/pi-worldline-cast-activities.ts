@@ -13,6 +13,7 @@ import {
 import { validateWorldlineGoalStartPayload } from "../contracts/worldline-cast-worker-spec.js";
 import { ApplicationFailure } from "@temporalio/activity";
 import type { WorldlineCastStageRequest, WorldlineCastStageResult } from "../runtime/pi-worldline-cast-agent.js";
+import { providerCallBudget, type PricingStatus } from "../llm/quota/provider-call.js";
 
 export interface PiWorldlineCastUsage {
   prompt_tokens?: number;
@@ -70,6 +71,7 @@ export interface PiWorldlineCastDeps {
     module_key: string;
     channel_id: string;
     model_id: string;
+    module_max_concurrency?: number;
   }): Promise<{ lease_id: string; release(): Promise<void> }>;
   reserveQuota?(request: {
     tenant_id: string;
@@ -77,8 +79,18 @@ export interface PiWorldlineCastDeps {
     run_id: string;
     module_key: string;
     provider_call_id: string;
-    estimated_tokens: number;
-  }): Promise<{ reservation_id: string; finalize(usage: PiWorldlineCastUsage): Promise<void> }>;
+    channel_id: string;
+    model_id: string;
+    reserved_tokens: number;
+    reserved_cost_micros: number;
+    pricing_status: PricingStatus;
+    ttl_seconds: number;
+  }): Promise<{
+    reservation_id: string;
+    status: "reserved" | "finalized";
+    finalize(usage: PiWorldlineCastUsage): Promise<void>;
+    release(): Promise<void>;
+  }>;
   runCastStage?(request: WorldlineCastStageRequest): Promise<WorldlineCastStageResult>;
   executeCastTool?(request: {
     tenant_id: string;
@@ -385,24 +397,45 @@ async function runCast(deps: PiWorldlineCastDeps, input: WorldlineGoalStartInput
     credential_ref: resolution.credential_ref
   });
   const providerCallId = worldlineCastProviderCallId(input);
-  const lease = await deps.acquireLLMLease?.({
-    tenant_id: input.tenant_id,
-    project_id: input.project_id,
-    run_id: input.run_id,
-    module_key: WORLDLINE_CAST_MODULE_KEY,
-    channel_id: resolution.channel_id,
-    model_id: resolution.model_id
-  });
-  const reservation = await deps.reserveQuota?.({
-    tenant_id: input.tenant_id,
-    project_id: input.project_id,
-    run_id: input.run_id,
-    module_key: WORLDLINE_CAST_MODULE_KEY,
-    provider_call_id: providerCallId,
-    estimated_tokens: 8000
-  });
+  if (!deps.acquireLLMLease || !deps.reserveQuota) {
+    throw Object.assign(new Error("WORLDLINE_CAST_RUNTIME_UNCONFIGURED: LLM quota and concurrency controls are unavailable"), {
+      code: "WORLDLINE_CAST_RUNTIME_UNCONFIGURED"
+    });
+  }
+  let lease: Awaited<ReturnType<NonNullable<PiWorldlineCastDeps["acquireLLMLease"]>>> | undefined;
+  let reservation: Awaited<ReturnType<NonNullable<PiWorldlineCastDeps["reserveQuota"]>>> | undefined;
+  let failure: unknown;
+  let finalized = false;
   try {
-    await deps.runCastStage({
+    const budget = providerCallBudget(resolution.settings);
+    lease = await deps.acquireLLMLease({
+      tenant_id: input.tenant_id,
+      project_id: input.project_id,
+      run_id: input.run_id,
+      module_key: WORLDLINE_CAST_MODULE_KEY,
+      channel_id: resolution.channel_id,
+      model_id: resolution.model_id,
+      module_max_concurrency: positiveIntegerSetting(resolution.settings, "max_concurrency")
+    });
+    reservation = await deps.reserveQuota({
+      tenant_id: input.tenant_id,
+      project_id: input.project_id,
+      run_id: input.run_id,
+      module_key: WORLDLINE_CAST_MODULE_KEY,
+      provider_call_id: providerCallId,
+      channel_id: resolution.channel_id,
+      model_id: resolution.model_id,
+      reserved_tokens: budget.reserved_tokens,
+      reserved_cost_micros: budget.reserved_cost_micros,
+      pricing_status: budget.pricing_status,
+      ttl_seconds: positiveIntegerSetting(resolution.settings, "quota_reservation_ttl_seconds") ?? 900
+    });
+    if (reservation.status === "finalized") {
+      throw Object.assign(new Error("LLM_PROVIDER_CALL_ALREADY_FINALIZED: worldline cast provider call requires recovery"), {
+        code: "LLM_PROVIDER_CALL_ALREADY_FINALIZED"
+      });
+    }
+    const stage = await deps.runCastStage({
       tenant_id: input.tenant_id,
       project_id: input.project_id,
       run_id: input.run_id,
@@ -445,9 +478,36 @@ async function runCast(deps: PiWorldlineCastDeps, input: WorldlineGoalStartInput
       },
       onAgentEvent: async (_event: AgentEvent) => undefined
     });
+    if (!stage.usage) {
+      throw Object.assign(new Error("LLM_PROVIDER_USAGE_MISSING: worldline cast provider did not return usage"), {
+        code: "LLM_PROVIDER_USAGE_MISSING"
+      });
+    }
+    await reservation.finalize(stage.usage);
+    finalized = true;
+  } catch (error) {
+    failure = error;
   } finally {
-    await reservation?.finalize({});
-    await lease?.release();
+    const cleanupErrors: unknown[] = [];
+    if (reservation?.status === "reserved" && !finalized) {
+      try {
+        await reservation.release();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (lease) {
+      try {
+        await lease.release();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (failure && cleanupErrors.length > 0) {
+      throw new AggregateError([failure, ...cleanupErrors], "worldline cast failed during cleanup");
+    }
+    if (failure) throw failure;
+    if (cleanupErrors.length > 0) throw cleanupErrors[0];
   }
 
   const committed = await deps.getCommittedCast?.({
@@ -461,6 +521,11 @@ async function runCast(deps: PiWorldlineCastDeps, input: WorldlineGoalStartInput
     });
   }
   return committed;
+}
+
+function positiveIntegerSetting(settings: Record<string, unknown>, key: string): number | undefined {
+  const value = settings[key];
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 function worldlineCastProviderCallId(input: WorldlineGoalStartInput): string {

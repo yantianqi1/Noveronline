@@ -116,7 +116,9 @@ async function sendJson<T>(
     keepalive: options.keepalive,
   });
   if (!response.ok) throw await readError(response);
-  return (await response.json()) as T;
+  if (response.status === 204 || response.status === 205) return undefined as T;
+  const text = await response.text();
+  return (text.trim() ? JSON.parse(text) : undefined) as T;
 }
 
 // ── Chapters ─────────────────────────────────────────────────────────────
