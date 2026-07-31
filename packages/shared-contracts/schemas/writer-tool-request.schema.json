@@ -11,6 +11,7 @@
     "selected_asset_ids",
     "graph_node_ids",
     "worldline_path_ids",
+    "worldline_session_ids",
     "tool_name"
   ],
   "properties": {
@@ -22,6 +23,7 @@
     "selected_asset_ids": { "$ref": "#/$defs/nonEmptyStringArray" },
     "graph_node_ids": { "$ref": "#/$defs/nonEmptyStringArray" },
     "worldline_path_ids": { "$ref": "#/$defs/nonEmptyStringArray" },
+    "worldline_session_ids": { "$ref": "#/$defs/nonEmptyStringArray" },
     "tool_name": {
       "enum": [
         "query_project_context",

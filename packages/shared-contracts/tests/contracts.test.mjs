@@ -129,6 +129,7 @@ test("current Go, Pi, and Web consumers cannot drift silently", () => {
     "selected_asset_ids",
     "graph_node_ids",
     "worldline_path_ids",
+    "worldline_session_ids",
     "options"
   ]));
   assert.deepEqual(interfacePropertyStringUnion(piRun, "WriterRunInput", "mode"), [...WRITER_MODES]);

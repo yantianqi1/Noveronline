@@ -85,6 +85,43 @@ func TestSQLSavedPathReaderReturnsNotFoundForEmptyProject(t *testing.T) {
 	}
 }
 
+func TestSQLSavedPathReaderGetsOneTenantProjectScopedPath(t *testing.T) {
+	queryer := &recordingWorldlineQueryer{
+		rows: &fakeWorldlineRows{values: [][]any{{
+			"path-1",
+			"session-1",
+			"project-123",
+			"公开路径",
+			"摘要",
+			"saved",
+			`[]`,
+			"",
+			"2026-07-05T00:00:00Z",
+			"2026-07-05T00:01:00Z",
+		}}},
+	}
+	reader := NewSQLSavedPathReader(SQLSavedPathReaderConfig{Queryer: queryer})
+
+	path, err := reader.GetSavedPath(context.Background(), GetSavedPathInput{
+		TenantID:  "tenant-123",
+		ProjectID: "project-123",
+		PathID:    "path-1",
+	})
+
+	if err != nil {
+		t.Fatalf("get saved path: %v", err)
+	}
+	if path.PathID != "path-1" || path.ProjectID != "project-123" {
+		t.Fatalf("unexpected saved path: %#v", path)
+	}
+	if !strings.Contains(queryer.query, "path_id::text = $3") {
+		t.Fatalf("expected exact path scope, got %s", queryer.query)
+	}
+	if !reflect.DeepEqual(queryer.args, []any{"tenant-123", "project-123", "path-1"}) {
+		t.Fatalf("unexpected query args: %#v", queryer.args)
+	}
+}
+
 func TestDisabledSavedPathStoreFailsClosed(t *testing.T) {
 	store := NewDisabledSavedPathStore()
 
@@ -449,6 +486,7 @@ func TestSQLSessionStoreListsAndGetsTenantScopedPublicSessions(t *testing.T) {
 			"Explore public consequence",
 			"path-1",
 			3,
+			2,
 			"user-1",
 			"2026-07-05T00:00:00Z",
 			"2026-07-05T00:01:00Z",
@@ -477,8 +515,8 @@ func TestSQLSessionStoreListsAndGetsTenantScopedPublicSessions(t *testing.T) {
 	if !strings.Contains(queryer.query, "FROM worldline_sessions") {
 		t.Fatalf("expected worldline_sessions query, got %s", queryer.query)
 	}
-	if !strings.Contains(queryer.query, "MAX(e.step)") || !strings.Contains(queryer.query, "FROM worldline_events e") {
-		t.Fatalf("expected domain-step subquery for current_step, got %s", queryer.query)
+	if !strings.Contains(queryer.query, "MAX(e.step)") || !strings.Contains(queryer.query, "canon_event_count") {
+		t.Fatalf("expected domain-step and canon-count subqueries, got %s", queryer.query)
 	}
 	if !strings.Contains(queryer.query, "s.tenant_id::text = $1") || !strings.Contains(queryer.query, "s.project_id::text = $2") {
 		t.Fatalf("expected tenant/project scoped list query, got %s", queryer.query)
@@ -497,6 +535,7 @@ func TestSQLSessionStoreListsAndGetsTenantScopedPublicSessions(t *testing.T) {
 		"active",
 		"Explore public consequence",
 		"path-1",
+		0,
 		0,
 		"user-1",
 		"2026-07-05T00:00:00Z",

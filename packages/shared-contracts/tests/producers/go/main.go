@@ -19,8 +19,9 @@ func main() {
 			"trace_id": "trace-go", "requested_by": "user-go", "request_id": "request-go",
 			"workflow_type": "writer_run", "mode": "draft", "instruction": "Write the next scene.",
 			"selected_asset_ids": []string{"asset-go"}, "graph_node_ids": []string{"node-go"},
-			"worldline_path_ids": []string{"path-go"},
-			"options":            map[string]any{"module_key": "writer_composer", "target_words": 900},
+			"worldline_path_ids":    []string{"path-go"},
+			"worldline_session_ids": []string{"session-go"},
+			"options":               map[string]any{"module_key": "writer_composer", "target_words": 900},
 		},
 		WriterRuntimeEvent: map[string]any{
 			"tenant_id": "tenant-go", "project_id": "project-go", "run_id": "run-go",
@@ -31,7 +32,8 @@ func main() {
 		WriterToolRequest: map[string]any{
 			"tenant_id": "tenant-go", "project_id": "project-go", "run_id": "run-go",
 			"selected_asset_ids": []string{"asset-go"}, "graph_node_ids": []string{"node-go"},
-			"worldline_path_ids": []string{"path-go"}, "tool_name": "query_world_rules",
+			"worldline_path_ids": []string{"path-go"}, "worldline_session_ids": []string{"session-go"},
+			"tool_name": "query_world_rules",
 		},
 		WriterPublicEvent: map[string]any{
 			"event_id": "event-go", "run_id": "run-go", "project_id": "project-go", "sequence": 3,

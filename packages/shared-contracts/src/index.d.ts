@@ -10,6 +10,7 @@ export type WriterRuntimeEventType =
   | "writer.retrieval_plan.degraded"
   | "writer.retrieval_plan.skipped"
   | "writer.always_on.injected"
+  | "writer.worldline_timeline.injected"
   | "writer.context_budget.trimmed"
   | "writer.consistency.violations"
   | "writer.consistency.clean"
@@ -73,6 +74,7 @@ export interface WriterWorkflowInput {
   selected_asset_ids?: string[];
   graph_node_ids?: string[];
   worldline_path_ids?: string[];
+  worldline_session_ids?: string[];
   options: {
     module_key: WriterModuleKey;
     thinking_level?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -103,6 +105,7 @@ export interface WriterToolRequest {
   selected_asset_ids: string[];
   graph_node_ids: string[];
   worldline_path_ids: string[];
+  worldline_session_ids: string[];
   tool_name: WriterToolName;
 }
 

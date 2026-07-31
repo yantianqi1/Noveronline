@@ -157,7 +157,8 @@ describe("createPostgresPiWriterDeps", () => {
       run_id: "run_1",
       selected_asset_ids: [],
       graph_node_ids: [],
-      worldline_path_ids: []
+      worldline_path_ids: [],
+      worldline_session_ids: [],
     };
 
     await expect(deps.executeWriterTool!({ ...request, tool_name: "query_world_rules" })).resolves.toEqual({
@@ -259,7 +260,8 @@ describe("createPostgresPiWriterDeps", () => {
       run_id: "run_1",
       selected_asset_ids: [],
       graph_node_ids: [],
-      worldline_path_ids: [] as string[]
+      worldline_path_ids: [],
+      worldline_session_ids: [],
     };
 
     await expect(deps.executeWriterTool!({ ...request, tool_name: "query_worldline_paths" })).resolves.toEqual({
@@ -296,6 +298,147 @@ describe("createPostgresPiWriterDeps", () => {
     expect(db.queries[1]?.text).toContain("scene_id = $3::uuid");
     expect(db.queries[2]?.text).toContain("status = 'active'");
     expect(db.queries[2]?.text).toContain("chapter_id = $3::uuid");
+  });
+
+  it("expands query_worldline_paths into author-ordered adopted events (doc 25 §3.3)", async () => {
+    const db = new RecordingDb();
+    // 1) saved path read (now returns session_id + selected_event_ids).
+    db.enqueue([{
+      path_id: "path-1",
+      session_id: "sess-1",
+      title: "黑化线",
+      summary: "主角坠入魔道",
+      lifecycle: "saved",
+      writer_instruction: "突出堕落递进",
+      selected_event_ids: '["ev-2","ev-1","ev-rejected"]'
+    }]);
+    // 2) event expansion read — only canon rows come back (rejected filtered by SQL).
+    db.enqueue([
+      { event_id: "ev-1", step: 1, title: "初遇", summary: "雨夜相逢", kind: "director", state_changes: '{"location":"城门","content":"不应公开"}' },
+      { event_id: "ev-2", step: 2, title: "决裂", summary: "师门决裂", kind: "director" }
+    ]);
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" })
+    });
+    const request = {
+      tenant_id: "ten_1",
+      project_id: "proj_1",
+      run_id: "run_1",
+      selected_asset_ids: [],
+      graph_node_ids: [],
+      worldline_path_ids: ["path-1"],
+      worldline_session_ids: [],
+    };
+
+    const result = await deps.executeWriterTool!({ ...request, tool_name: "query_worldline_paths" });
+
+    // Events re-threaded in the author's saved order (ev-2 then ev-1), not step order;
+    // the rejected/candidate id never surfaces.
+    expect(result.canon_status).toBe("reference_only");
+    const paths = result.paths as Array<{ path_id: string; session_id: string; events: Array<{ event_id: string }> }>;
+    expect(paths).toHaveLength(1);
+    expect(paths[0]?.path_id).toBe("path-1");
+    expect(paths[0]?.session_id).toBe("sess-1");
+    expect(paths[0]?.events.map((e) => e.event_id)).toEqual(["ev-2", "ev-1"]);
+    expect(paths[0]?.events[1]).toMatchObject({ state_changes: { location: "城门" } });
+    // The expansion query filters to adopted canon events only.
+    expect(db.queries[1]?.text).toContain("FROM worldline_events");
+    expect(db.queries[1]?.text).toContain("e.status = 'canon'");
+  });
+
+  it("prefetches the adopted worldline plot timeline ordered by step (doc 25 §3.2)", async () => {
+    const db = new RecordingDb();
+    db.enqueue([
+      { event_id: "ev-1", session_id: "sess-1", step: 1, title: "初遇", summary: "雨夜相逢", kind: "director", state_changes: '{"location":"城门","content":"不应公开"}' },
+      { event_id: "ev-2", session_id: "sess-1", step: 2, title: "决裂", summary: "师门决裂", kind: "director" }
+    ]);
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" })
+    });
+    const request = {
+      tenant_id: "ten_1",
+      project_id: "proj_1",
+      run_id: "run_1",
+      selected_asset_ids: [],
+      graph_node_ids: [],
+      worldline_path_ids: [],
+      worldline_session_ids: ["sess-1"],
+      tool_name: "query_worldline_paths" as const
+    };
+
+    const result = await deps.loadWorldlineTimeline!(request);
+
+    expect(result.timelines).toHaveLength(1);
+    expect(result.timelines[0]?.session_id).toBe("sess-1");
+    expect(result.timelines[0]?.events.map((e) => e.event_id)).toEqual(["ev-1", "ev-2"]);
+    expect(result.timelines[0]?.events[0]).toMatchObject({ step: 1, title: "初遇", summary: "雨夜相逢" });
+    expect(result.timelines[0]?.events[0].state_changes).toEqual({ location: "城门" });
+    // Canon-only, ordered by step, scoped to the attached sessions.
+    expect(db.queries[0]?.text).toContain("e.status = 'canon'");
+    expect(db.queries[0]?.text).toContain("ORDER BY e.session_id, e.step ASC");
+    expect(db.queries[0]?.values).toEqual(["ten_1", "proj_1", ["sess-1"]]);
+  });
+
+  it("does not globally truncate canon timelines across attached sessions", async () => {
+    const db = new RecordingDb();
+    db.enqueue(
+      ["sess-1", "sess-2"].flatMap((sessionId) =>
+        Array.from({ length: 61 }, (_, index) => ({
+          event_id: `${sessionId}-event-${index + 1}`,
+          session_id: sessionId,
+          step: index + 1,
+          title: `事件 ${index + 1}`,
+          summary: "公开摘要",
+          kind: "director"
+        }))
+      )
+    );
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" })
+    });
+
+    const result = await deps.loadWorldlineTimeline!({
+      tenant_id: "ten_1",
+      project_id: "proj_1",
+      run_id: "run_1",
+      selected_asset_ids: [],
+      graph_node_ids: [],
+      worldline_path_ids: [],
+      worldline_session_ids: ["sess-1", "sess-2"],
+      tool_name: "query_worldline_paths"
+    });
+
+    expect(result.timelines.map((timeline) => timeline.events)).toHaveLength(2);
+    expect(result.timelines[0]?.events).toHaveLength(61);
+    expect(result.timelines[1]?.events).toHaveLength(61);
+    expect(db.queries[0]?.text).not.toMatch(/\bLIMIT\s+\$4\b/i);
+  });
+
+  it("returns an empty worldline timeline when no session is attached", async () => {
+    const db = new RecordingDb();
+    const deps = createPostgresPiWriterDeps({
+      db,
+      decryptCredential: async () => "sk-live",
+      composeDraft: async () => ({ content: "draft" })
+    });
+    const result = await deps.loadWorldlineTimeline!({
+      tenant_id: "ten_1",
+      project_id: "proj_1",
+      run_id: "run_1",
+      selected_asset_ids: [],
+      graph_node_ids: [],
+      worldline_path_ids: [],
+      worldline_session_ids: [],
+      tool_name: "query_worldline_paths"
+    });
+    expect(result).toEqual({ timelines: [] });
+    expect(db.queries).toHaveLength(0);
   });
 
   it("sets tenant and project context on DB queries that touch RLS-backed runtime tables", async () => {
@@ -1104,7 +1247,8 @@ describe("createPostgresPiWriterDeps", () => {
       run_id: "run_1",
       selected_asset_ids: [],
       graph_node_ids: [],
-      worldline_path_ids: []
+      worldline_path_ids: [],
+      worldline_session_ids: [],
     };
 
     const result = await deps.executeWriterTool!({
@@ -1151,6 +1295,7 @@ describe("createPostgresPiWriterDeps", () => {
       selected_asset_ids: [],
       graph_node_ids: [],
       worldline_path_ids: [],
+      worldline_session_ids: [],
       tool_name: "search_assets",
       tool_args: { query: "许七安的师门 打更人", mode: "keyword" }
     });
@@ -1177,7 +1322,8 @@ describe("createPostgresPiWriterDeps", () => {
       run_id: "run_1",
       selected_asset_ids: [],
       graph_node_ids: [],
-      worldline_path_ids: []
+      worldline_path_ids: [],
+      worldline_session_ids: [],
     };
 
     const result = await deps.executeWriterTool!({
@@ -1241,7 +1387,8 @@ describe("createPostgresPiWriterDeps", () => {
       run_id: "run_1",
       selected_asset_ids: [],
       graph_node_ids: [],
-      worldline_path_ids: []
+      worldline_path_ids: [],
+      worldline_session_ids: [],
     };
 
     const result = await deps.executeWriterTool!({
@@ -1283,6 +1430,7 @@ describe("createPostgresPiWriterDeps", () => {
         selected_asset_ids: [],
         graph_node_ids: [],
         worldline_path_ids: [],
+        worldline_session_ids: [],
         tool_name: "search_assets",
         tool_args: { query: "   " }
       })
@@ -1299,7 +1447,8 @@ describe("createPostgresPiWriterDeps", () => {
       scene_id: "scene-1",
       selected_asset_ids: [],
       graph_node_ids: [],
-      worldline_path_ids: []
+      worldline_path_ids: [],
+      worldline_session_ids: [],
     };
 
     // Degraded path: embedding module unbound -> empty, mode_used unavailable.
@@ -1393,6 +1542,7 @@ describe("createPostgresPiWriterDeps", () => {
       selected_asset_ids: [],
       graph_node_ids: [],
       worldline_path_ids: [],
+      worldline_session_ids: [],
       tool_name: "search_assets",
       tool_args: { query: "凶手 动机", mode: "keyword" }
     });
@@ -1420,6 +1570,7 @@ describe("createPostgresPiWriterDeps", () => {
       selected_asset_ids: [],
       graph_node_ids: [],
       worldline_path_ids: [],
+      worldline_session_ids: [],
       tool_name: "search_assets",
       tool_args: { query: "凶手 动机", mode: "keyword" }
     });
@@ -1454,6 +1605,7 @@ describe("createPostgresPiWriterDeps", () => {
       selected_asset_ids: [],
       graph_node_ids: [],
       worldline_path_ids: [],
+      worldline_session_ids: [],
       tool_name: "search_assets",
       tool_args: { query: "沈翠花回山见师父,大师兄云峰已在山下等候", channel: "keyed" }
     });
@@ -1486,6 +1638,7 @@ describe("createPostgresPiWriterDeps", () => {
       selected_asset_ids: [],
       graph_node_ids: [],
       worldline_path_ids: [],
+      worldline_session_ids: [],
       tool_name: "fuse_recall",
       tool_args: {
         channels: [
@@ -1518,7 +1671,7 @@ describe("createPostgresPiWriterDeps", () => {
     const rerankCalls: Array<{ query: string; ids: string[] }> = [];
     const result = await deps.executeWriterTool!({
       tenant_id: "ten_1", project_id: "proj_1", run_id: "run_1",
-      selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [],
+      selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [], worldline_session_ids: [],
       tool_name: "fuse_recall",
       tool_args: {
         rerank: true,
@@ -1544,7 +1697,7 @@ describe("createPostgresPiWriterDeps", () => {
     // Degraded path: executor throws -> falls back to RRF order, flagged.
     const degraded = await deps.executeWriterTool!({
       tenant_id: "ten_1", project_id: "proj_1", run_id: "run_1",
-      selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [],
+      selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [], worldline_session_ids: [],
       tool_name: "fuse_recall",
       tool_args: {
         rerank: true, query: "x",
@@ -1563,7 +1716,7 @@ describe("createPostgresPiWriterDeps", () => {
     // Rerank requested but no executor wired -> explicit, visible degradation.
     const unwired = await deps.executeWriterTool!({
       tenant_id: "ten_1", project_id: "proj_1", run_id: "run_1",
-      selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [],
+      selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [], worldline_session_ids: [],
       tool_name: "fuse_recall",
       tool_args: {
         rerank: true, query: "x",
@@ -1590,7 +1743,7 @@ describe("createPostgresPiWriterDeps", () => {
     const result = await deps.loadAlwaysOnAssets!({
       tenant_id: "ten_1", project_id: "proj_1", run_id: "run_1",
       chapter_id: "chapter-1",
-      selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [],
+      selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [], worldline_session_ids: [],
       tool_name: "search_assets",
       tool_args: { channel: "always_on" }
     });
@@ -1620,7 +1773,7 @@ describe("createPostgresPiWriterDeps", () => {
 
     const result = await deps.loadAlwaysOnAssets!({
       tenant_id: "ten_1", project_id: "proj_1", run_id: "run_1",
-      selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [],
+      selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [], worldline_session_ids: [],
       tool_name: "search_assets",
       tool_args: { channel: "always_on" }
     });

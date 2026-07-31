@@ -675,6 +675,89 @@ describe("runPiWriterRunActivity", () => {
     expect(JSON.stringify(injected)).not.toContain(big);
   });
 
+  it("prefetches the attached worldline timeline and injects it into orchestrator + composer (doc 25)", async () => {
+    const workflows: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    let orchestratorTimelines: unknown;
+    let composerTimelines: unknown;
+    let loadTimelineCalled = false;
+    let failTimelineLoad = false;
+    let composeCalls = 0;
+    const timeline = {
+      session_id: "sess-1",
+      events: [
+        { event_id: "ev-1", session_id: "sess-1", step: 1, title: "初遇", summary: "雨夜相逢", kind: "director", state_changes: {} },
+        { event_id: "ev-2", session_id: "sess-1", step: 2, title: "决裂", summary: "师门决裂", kind: "director", state_changes: {} }
+      ]
+    };
+    const activity = createPiWriterRunActivity({
+      resolveModuleBinding: async ({ module_key }) => ({
+        module_key,
+        channel_id: `${module_key}-channel`, model_id: `${module_key}-model`, provider: "openai-compatible",
+        base_url: "http://127.0.0.1:1/v1", credential_ref: `${module_key}-channel`,
+        supports_tools: module_key === "writer_orchestrator", supports_json: true, settings: {}
+      }),
+      resolveCredential: async ({ module_key }) => ({ apiKey: `key-for-${module_key}` }),
+      reserveLLMQuota: async (request) => ({ reservation_id: `r-${request.module_key}`, provider_call_id: request.provider_call_id, status: "reserved", expires_at: "2026-07-10T12:05:00.000Z" }),
+      finalizeLLMQuota: async () => undefined,
+      releaseLLMQuota: async () => undefined,
+      acquireLLMLease: async ({ channel_id }) => ({ lease_id: channel_id, channel_id, lock_mode: "slot:0" }),
+      releaseLLMLease: async () => undefined,
+      planRetrieval: async () => ({
+        plan: { intent: "continue_scene", coverage: [], queries: [{ channel: "hybrid", text: "x" }] },
+        usage: { prompt_tokens: 1, completion_tokens: 1 }
+      }),
+      loadWorldlineTimeline: async (request) => {
+        loadTimelineCalled = true;
+        if (failTimelineLoad) throw new Error("worldline database unavailable");
+        // The deterministic prefetch is driven by the attached session ids.
+        expect(request.worldline_session_ids).toEqual(["sess-1"]);
+        return { timelines: [timeline] };
+      },
+      executeWriterTool: async () => ({}),
+      orchestrateWritingBrief: async (request) => {
+        orchestratorTimelines = request.worldline_timelines;
+        return { writing_brief: "brief", usage: { prompt_tokens: 1, completion_tokens: 1 } };
+      },
+      composeDraft: async (request) => {
+        composeCalls += 1;
+        composerTimelines = request.worldline_timelines;
+        return { content: "正文", usage: { prompt_tokens: 1, completion_tokens: 1 } };
+      },
+      saveDraftRevision: async () => ({ draft_id: "draft-1" }),
+      recordLLMActivity: async () => undefined,
+      recordUsageEvent: async () => undefined,
+      recordAgentTraceEvent: async () => undefined,
+      recordWorkflowEvent: async (request) => { workflows.push({ type: request.event_type, payload: request.payload }); },
+      updateWriterRunStatus: async () => undefined
+    });
+
+    const result = await activity({
+      ...basePayload,
+      worldline_session_ids: ["sess-1"]
+    });
+
+    expect(result).toMatchObject({ status: "completed" });
+    expect(loadTimelineCalled).toBe(true);
+    // Timeline reaches BOTH stages, ordered by step, tool-independent.
+    expect(orchestratorTimelines).toEqual([timeline]);
+    expect(composerTimelines).toEqual([timeline]);
+    // Its presence is a visible workflow event (counts only, no content).
+    const injected = workflows.find((w) => w.type === "writer.worldline_timeline.injected");
+    expect(injected?.payload).toEqual({ sessions: 1, events: 2 });
+
+    failTimelineLoad = true;
+    const failed = await activity({
+      ...basePayload,
+      run_id: "run-worldline-failure",
+      worldline_session_ids: ["sess-1"]
+    });
+    expect(failed).toMatchObject({
+      status: "failed",
+      error: { code: "WRITER_WORLDLINE_TIMELINE_LOAD_FAILED" }
+    });
+    expect(composeCalls).toBe(1);
+  });
+
   it("treats always_on load failure as a visible no-op, not a run failure", async () => {
     const workflows: Array<{ type: string; payload: Record<string, unknown> }> = [];
     const activity = createPiWriterRunActivity({

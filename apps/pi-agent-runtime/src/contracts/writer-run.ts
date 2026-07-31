@@ -13,6 +13,12 @@ export interface WriterRunInput {
   selected_asset_ids: string[];
   graph_node_ids: string[];
   worldline_path_ids: string[];
+  /**
+   * Worldline simulation sessions whose adopted canon events (status='canon')
+   * form the ordered plot timeline the writer should follow. Fetched
+   * deterministically at run start (ordered by step), not left to tool luck.
+   */
+  worldline_session_ids: string[];
   options: {
     module_key: "writer_composer" | "writer_orchestrator";
     thinking_level?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";

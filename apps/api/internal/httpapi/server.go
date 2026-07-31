@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"mirofish-novel/apps/api/internal/assetdistillation"
 	"mirofish-novel/apps/api/internal/assets"
 	"mirofish-novel/apps/api/internal/auth"
@@ -306,11 +308,15 @@ type errorEnvelope struct {
 }
 
 type startWriterRunRequest struct {
-	Mode        string         `json:"mode"`
-	Instruction string         `json:"instruction"`
-	ChapterID   string         `json:"chapter_id"`
-	SceneID     string         `json:"scene_id"`
-	Options     map[string]any `json:"options"`
+	Mode        string `json:"mode"`
+	Instruction string `json:"instruction"`
+	ChapterID   string `json:"chapter_id"`
+	SceneID     string `json:"scene_id"`
+	// Worldline attachments: saved paths to deep-read and simulation sessions whose
+	// adopted canon events form the ordered plot timeline (doc 25).
+	WorldlinePathIDs    []string       `json:"worldline_path_ids"`
+	WorldlineSessionIDs []string       `json:"worldline_session_ids"`
+	Options             map[string]any `json:"options"`
 }
 
 type createDevSessionRequest struct {
@@ -3737,6 +3743,48 @@ func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *htt
 		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid writer run payload", nil)
 		return
 	}
+	worldlinePathIDs, err := normalizeWorldlineIDList(payload.WorldlinePathIDs, "worldline_path_ids")
+	if err != nil {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		return
+	}
+	worldlineSessionIDs, err := normalizeWorldlineIDList(payload.WorldlineSessionIDs, "worldline_session_ids")
+	if err != nil {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", err.Error(), nil)
+		return
+	}
+	for _, sessionID := range worldlineSessionIDs {
+		session, sessErr := s.worldlineSessionReader.GetSession(request.Context(), worldline.GetSessionInput{
+			TenantID:  tenantID,
+			SessionID: sessionID,
+		})
+		if sessErr != nil {
+			code := worldline.ErrorCode(sessErr)
+			if code == "NOT_FOUND" {
+				code = "VALIDATION_FAILED"
+			}
+			writeError(response, request, statusForAppCode(code), code, worldlineSessionStartAdmissionPublicErrorMessage(code), nil)
+			return
+		}
+		if !strings.EqualFold(strings.TrimSpace(session.ProjectID), projectID) {
+			writeError(response, request, http.StatusForbidden, "FORBIDDEN", "worldline session does not belong to this project", nil)
+			return
+		}
+	}
+	for _, pathID := range worldlinePathIDs {
+		if _, pathErr := s.worldlineSavedPathReader.GetSavedPath(request.Context(), worldline.GetSavedPathInput{
+			TenantID:  tenantID,
+			ProjectID: projectID,
+			PathID:    pathID,
+		}); pathErr != nil {
+			code := worldline.ErrorCode(pathErr)
+			if code == "NOT_FOUND" {
+				code = "VALIDATION_FAILED"
+			}
+			writeError(response, request, statusForAppCode(code), code, worldlineSavedPathAdmissionPublicErrorMessage(code), nil)
+			return
+		}
+	}
 	// CONN-016: Pi dual-stage always needs writer_orchestrator + writer_composer.
 	// Prefer explicit module_key as the primary resolution stored on the run, but
 	// fail closed if any required module binding is missing before Temporal admit.
@@ -3789,6 +3837,14 @@ func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *htt
 	options["module_key"] = moduleKey
 	options["llm_resolution"] = workflowLLMResolution(primaryResolution)
 	options["required_module_keys"] = requiredModules
+	// Worldline attachments have already passed tenant/project admission above;
+	// forward the canonical UUIDs into the workflow for deterministic prefetch.
+	if len(worldlinePathIDs) > 0 {
+		options["worldline_path_ids"] = worldlinePathIDs
+	}
+	if len(worldlineSessionIDs) > 0 {
+		options["worldline_session_ids"] = worldlineSessionIDs
+	}
 	run, err := s.writerStarter.StartWriterRun(request.Context(), workflows.StartWriterRunInput{
 		TenantID:     tenantID,
 		ProjectID:    projectID,
@@ -9213,6 +9269,28 @@ func cloneOptions(options map[string]any) map[string]any {
 	return clone
 }
 
+// normalizeWorldlineIDList validates and de-duplicates client-supplied UUIDs,
+// preserving first-seen order. Empty values are invalid rather than silently
+// disappearing, so a malformed attachment cannot become an apparently valid run.
+func normalizeWorldlineIDList(ids []string, fieldName string) ([]string, error) {
+	clean := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		trimmed := strings.TrimSpace(id)
+		parsed, err := uuid.Parse(trimmed)
+		if err != nil {
+			return nil, errors.New(fieldName + " must contain valid UUIDs")
+		}
+		canonical := parsed.String()
+		if _, exists := seen[canonical]; exists {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		clean = append(clean, canonical)
+	}
+	return clean, nil
+}
+
 func sanitizeWorkflowOptions(options map[string]any) map[string]any {
 	clean := map[string]any{}
 	for key, value := range options {
@@ -9552,6 +9630,32 @@ func worldlineSessionOwnerPreflightPublicErrorMessage(code string) string {
 		return "worldline session lookup failed"
 	default:
 		return "worldline session lookup failed"
+	}
+}
+
+func worldlineSessionStartAdmissionPublicErrorMessage(code string) string {
+	switch code {
+	case "VALIDATION_FAILED":
+		return "worldline session was not found"
+	case "WORLDLINE_SESSION_BACKEND_UNCONFIGURED":
+		return "worldline session backend is not configured"
+	case "WORLDLINE_QUERY_FAILED":
+		return "worldline session lookup failed"
+	default:
+		return "worldline session lookup failed"
+	}
+}
+
+func worldlineSavedPathAdmissionPublicErrorMessage(code string) string {
+	switch code {
+	case "VALIDATION_FAILED":
+		return "worldline saved path was not found"
+	case "WORLDLINE_BACKEND_UNCONFIGURED", "WORLDLINE_SAVED_PATH_BACKEND_UNCONFIGURED":
+		return "worldline saved path backend is not configured"
+	case "WORLDLINE_QUERY_FAILED":
+		return "worldline saved path lookup failed"
+	default:
+		return "worldline saved path lookup failed"
 	}
 }
 

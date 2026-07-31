@@ -29,6 +29,7 @@
     "selected_asset_ids": { "$ref": "#/$defs/nonEmptyStringArray" },
     "graph_node_ids": { "$ref": "#/$defs/nonEmptyStringArray" },
     "worldline_path_ids": { "$ref": "#/$defs/nonEmptyStringArray" },
+    "worldline_session_ids": { "$ref": "#/$defs/nonEmptyStringArray" },
     "options": {
       "type": "object",
       "required": ["module_key"],

@@ -266,6 +266,10 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
         }
         break;
       }
+      // The timeline event contains counts only. It is intentionally consumed
+      // here so it cannot fall through as an unknown tool/retrieval event.
+      case "writer.worldline_timeline.injected":
+        break;
       case "writer.token":
         candidateText += typeof payload.token === "string" ? payload.token : "";
         if (!TERMINAL.has(phase)) phase = "composing";

@@ -1,6 +1,6 @@
 # SaaS Current Development Progress
 
-更新时间：`2026-07-27`
+更新时间：`2026-07-31`
 
 ## 文档职责
 
@@ -17,6 +17,12 @@
 | 中央集成 | 产品 handlers/workers 已进入中央 auth/RBAC/CSRF/RLS/limiter/readiness 安全壳 |
 | Compose | 全服务 health、31 migrations readiness、持久化 restart/recovery、worker queues 当前通过 |
 | 当前未完成 | 唯一 Legacy 候选尚未获授权为真实业务数据；apply/verify/rollback/final cutover 尚未执行 |
+
+## 2026-07-31 上线前缺陷审查修复
+
+`docs/refactor-saas/25-worldline-timeline-writer-recall-plan.md` §8 的六项确认缺陷已按设计逐项修复：Pi 世界线时间线不再跨 session 全局截断，Go writer admission 校验 UUID 与 tenant/project 归属并在副作用前 fail closed，`state_changes` 贯通公开时间线与 Writer 两阶段 prompt；Web 起草失败回滚 optimistic turn，世界线选择器改为一次会话列表读取 canon 计数并显式显示读取失败；真实书架验收脚本移除内置账号密码。
+
+Focused 证据：Go API full、Pi Runtime `138 passed, 4 skipped` + typecheck/build、Web `121 passed, 1 skipped` + typecheck/build、shared-contracts `4 passed`、隔离 Worldline live 与 Pi writer live `2 passed`、`git diff --check` 均通过。该修复不改变 MAIN-100 的 Legacy 授权 gate，也不将 Z-028 的 Z7 browser journey 标记为完成。
 
 ## 2026-07-27 全模块缺陷审计收口
 

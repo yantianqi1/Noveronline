@@ -517,6 +517,26 @@ function orchestratorPrompt(request: OrchestrateWritingBriefRequest): string {
     graph_node_ids: request.graph_node_ids,
     worldline_path_ids: request.worldline_path_ids,
     target_words: request.target_words,
+    ...(request.worldline_timelines && request.worldline_timelines.some((t) => t.events.length > 0)
+      ? {
+          worldline_timeline: {
+            guidance:
+              "Plot timeline from the author's worldline simulation: these are ADOPTED events, ordered by step (the sequence they occur). They are REFERENCE, not immutable canon — but the author attached this timeline so the prose should FOLLOW it: carry every step into the writing brief in order, flesh each event out into the scenes that realise it, and do not reorder or skip steps unless the author's instruction for this run explicitly asks for a change. Weave the timeline into the brief as the story's forward direction, not as a quoted list.",
+            sessions: request.worldline_timelines
+              .filter((t) => t.events.length > 0)
+              .map((timeline) => ({
+                session_id: timeline.session_id,
+                events: timeline.events.map((event) => ({
+                  step: event.step,
+                  title: event.title,
+                  summary: event.summary,
+                  kind: event.kind,
+                  state_changes: event.state_changes
+                }))
+              }))
+          }
+        }
+      : {}),
     ...(request.always_on_assets && request.always_on_assets.length > 0
       ? {
           always_on_canon: {
@@ -567,6 +587,28 @@ function composerConstantCanon(request: ComposeDraftRequest): Record<string, unk
   };
 }
 
+/** The worldline plot timeline rides the composer prompt too (doc 25 §3.4): even
+ * if the orchestrator's brief under-weights it, the prose stage still sees the
+ * ordered adopted events and is told to follow their sequence. Reference-only. */
+function composerWorldlineTimeline(request: ComposeDraftRequest): Record<string, unknown> {
+  if (!request.worldline_timelines || !request.worldline_timelines.some((t) => t.events.length > 0)) return {};
+  return {
+    worldline_timeline: {
+      guidance:
+        "Plot timeline from the author's worldline simulation (adopted events, in step order). Reference, not immutable canon — but write the prose ALONG this sequence: realise each step in turn, do not reorder or skip unless the instruction explicitly says so.",
+      events: request.worldline_timelines
+        .flatMap((timeline) => timeline.events)
+        .sort((a, b) => a.step - b.step)
+        .map((event) => ({
+          step: event.step,
+          title: event.title,
+          summary: event.summary,
+          state_changes: event.state_changes
+        }))
+    }
+  };
+}
+
 function composerPrompt(request: ComposeDraftRequest): string {
   if (request.mode === "revise" && request.revise) {
     return JSON.stringify({
@@ -583,7 +625,8 @@ function composerPrompt(request: ComposeDraftRequest): string {
     instruction: request.instruction,
     writing_brief: request.writing_brief,
     target_words: request.target_words,
-    ...composerConstantCanon(request)
+    ...composerConstantCanon(request),
+    ...composerWorldlineTimeline(request)
   });
 }
 

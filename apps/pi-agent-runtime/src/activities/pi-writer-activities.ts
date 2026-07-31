@@ -66,6 +66,11 @@ export interface ComposeDraftRequest {
   abort_signal?: AbortSignal;
   /** Constant-injection (always_on) canon, present on every dual-stage run. */
   always_on_assets?: AlwaysOnAssetItem[];
+  /**
+   * Adopted (canon) worldline plot timelines, prefetched at run start and ordered
+   * by step. Reference-only; the writer should sequence prose against them.
+   */
+  worldline_timelines?: WorldlineTimeline[];
   onToken?(token: string): Promise<void>;
 }
 
@@ -136,6 +141,8 @@ export interface ExecuteWriterToolRequest {
   selected_asset_ids: string[];
   graph_node_ids: string[];
   worldline_path_ids: string[];
+  /** Worldline sessions whose adopted canon events form the ordered plot timeline. */
+  worldline_session_ids: string[];
   tool_name: WriterToolName;
   tool_args?: Record<string, unknown>;
   /**
@@ -158,6 +165,26 @@ export interface AlwaysOnAssetItem {
   content_preview: string;
 }
 
+/**
+ * One adopted (canon) worldline event on the plot timeline. Ordered by `step`;
+ * injected as a reference-only guide the writer should sequence prose against.
+ */
+export interface WorldlineTimelineEvent {
+  event_id: string;
+  session_id: string;
+  step: number;
+  title: string;
+  summary: string;
+  kind: string;
+  state_changes: Record<string, unknown>;
+}
+
+/** The ordered plot timeline for one worldline session — reference-only. */
+export interface WorldlineTimeline {
+  session_id: string;
+  events: WorldlineTimelineEvent[];
+}
+
 export interface OrchestrateWritingBriefRequest extends Omit<ComposeDraftRequest, "writing_brief" | "onToken"> {
   mode: WriterRunInput["mode"];
   chapter_id?: string;
@@ -165,6 +192,8 @@ export interface OrchestrateWritingBriefRequest extends Omit<ComposeDraftRequest
   selected_asset_ids: string[];
   graph_node_ids: string[];
   worldline_path_ids: string[];
+  /** Worldline sessions attached to this run (the timelines are prefetched). */
+  worldline_session_ids: string[];
   tool_execution?: ToolExecutionMode;
   tool_names: WriterToolName[];
   runtime_context: RuntimeContext;
@@ -419,6 +448,7 @@ export interface RecordWorkflowEventRequest {
     | "writer.retrieval_plan.degraded"
     | "writer.retrieval_plan.skipped"
     | "writer.always_on.injected"
+    | "writer.worldline_timeline.injected"
     | "writer.context_budget.trimmed"
     | "writer.consistency.violations"
     | "writer.consistency.clean"
@@ -518,6 +548,13 @@ export interface PiWriterRunActivityDeps {
   loadConsistencyCanon?(request: ExecuteWriterToolRequest): Promise<{ canon: ConsistencyCanonItem[] }>;
   /** Load the constant-injection (always_on) canon present on every run. */
   loadAlwaysOnAssets?(request: ExecuteWriterToolRequest): Promise<{ assets: AlwaysOnAssetItem[] }>;
+  /**
+   * Deterministically load the adopted (canon) worldline events for each session
+   * in worldline_session_ids, ordered by step. Runs at run start so the plot
+   * timeline is always present — never left to whether the orchestrator calls a
+   * tool. Reference-only; candidates/rejected events never surface.
+   */
+  loadWorldlineTimeline?(request: ExecuteWriterToolRequest): Promise<{ timelines: WorldlineTimeline[] }>;
   orchestrateWritingBrief?(request: OrchestrateWritingBriefRequest): Promise<OrchestrateWritingBriefResult>;
   executeWriterTool?(request: ExecuteWriterToolRequest): Promise<Record<string, unknown>>;
   resolveCredential(request: CredentialRequest): Promise<Credential>;
@@ -1136,6 +1173,7 @@ async function runDualStagePiWriterActivity(
           selected_asset_ids: input.selected_asset_ids,
           graph_node_ids: input.graph_node_ids,
           worldline_path_ids: input.worldline_path_ids,
+          worldline_session_ids: input.worldline_session_ids,
           tool_name: "search_assets",
           tool_args: { channel: "always_on" }
         });
@@ -1156,6 +1194,43 @@ async function runDualStagePiWriterActivity(
           asset_type: asset.asset_type
         }))
       }, "always_on:injected");
+    }
+
+    // Doc 25 §3.2: deterministic worldline plot-timeline prefetch. Like
+    // always_on, this is unconditional (not a tool the orchestrator might skip)
+    // because the author explicitly attached the worldline — the timeline MUST be
+    // present so the writer sequences prose against it. Only adopted (canon)
+    // events load, ordered by step, reference-only. Absence (no session attached
+    // or no canon yet) is a silent empty timeline; presence is a visible event.
+    let worldlineTimelines: WorldlineTimeline[] = [];
+    if (deps.loadWorldlineTimeline && input.worldline_session_ids.length > 0) {
+      try {
+        const loaded = await deps.loadWorldlineTimeline({
+          tenant_id: input.tenant_id,
+          project_id: input.project_id,
+          run_id: input.run_id,
+          chapter_id: input.chapter_id,
+          scene_id: input.scene_id,
+          selected_asset_ids: input.selected_asset_ids,
+          graph_node_ids: input.graph_node_ids,
+          worldline_path_ids: input.worldline_path_ids,
+          worldline_session_ids: input.worldline_session_ids,
+          tool_name: "query_worldline_paths"
+        });
+        worldlineTimelines = loaded.timelines.filter((timeline) => timeline.events.length > 0);
+      } catch (error) {
+        throw runtimeFailure(
+          "WRITER_WORLDLINE_TIMELINE_LOAD_FAILED",
+          `Attached worldline timeline could not be loaded: ${errorMessageText(error)}`,
+          "writer_orchestrator"
+        );
+      }
+    }
+    if (worldlineTimelines.length > 0) {
+      await recordWorkflow("writer.worldline_timeline.injected", {
+        sessions: worldlineTimelines.length,
+        events: worldlineTimelines.reduce((sum, timeline) => sum + timeline.events.length, 0)
+      }, "worldline_timeline:injected");
     }
 
     // P2 (doc 41 §4.6): the cross-encoder rerank fires inside the orchestrator's
@@ -1241,10 +1316,12 @@ async function runDualStagePiWriterActivity(
         selected_asset_ids: input.selected_asset_ids,
         graph_node_ids: input.graph_node_ids,
         worldline_path_ids: input.worldline_path_ids,
+        worldline_session_ids: input.worldline_session_ids,
         tool_execution: input.options.tool_execution,
         tool_names: toolNames,
         retrieval_plan: retrievalPlan,
         always_on_assets: alwaysOnAssets,
+        worldline_timelines: worldlineTimelines,
         runtime_context: {
           ...runtimeContext,
           permissions: { tools: toolNames, can_write_draft: false }
@@ -1282,6 +1359,7 @@ async function runDualStagePiWriterActivity(
             selected_asset_ids: input.selected_asset_ids,
             graph_node_ids: input.graph_node_ids,
             worldline_path_ids: input.worldline_path_ids,
+            worldline_session_ids: input.worldline_session_ids,
             tool_name: toolName,
             tool_args: toolArgs,
             ...(toolName === "fuse_recall" && rerankExecutor ? { rerank_executor: rerankExecutor } : {})
@@ -1357,6 +1435,7 @@ async function runDualStagePiWriterActivity(
         ...composeRequest(input, composer, apiKey, providerCallID, deps.cancellationSignal?.()),
         writing_brief: writingBrief.writing_brief,
         always_on_assets: alwaysOnAssets,
+        worldline_timelines: worldlineTimelines,
         onToken: async (token) => {
           const index = ++chunkIndex;
           await recordWorkflow("writer.token", { token, chunk_index: index }, `composer:token:${index}`);
@@ -1402,6 +1481,7 @@ async function runDualStagePiWriterActivity(
             selected_asset_ids: input.selected_asset_ids,
             graph_node_ids: input.graph_node_ids,
             worldline_path_ids: input.worldline_path_ids,
+            worldline_session_ids: input.worldline_session_ids,
             tool_name: "query_world_rules"
           });
           if (canon.length > 0) {
@@ -1556,6 +1636,7 @@ function writerSourceMetadata(input: WriterRunInput): Record<string, unknown> {
     asset_ids: input.selected_asset_ids,
     graph_node_ids: input.graph_node_ids,
     worldline_path_ids: input.worldline_path_ids,
+    worldline_session_ids: input.worldline_session_ids,
     reference_counts: {
       assets: input.selected_asset_ids.length,
       graph_nodes: input.graph_node_ids.length,
@@ -1638,7 +1719,14 @@ function publicWriterToolResult(toolName: string, value: unknown): Record<string
   }
   if (toolName === "query_worldline_paths") {
     return {
-      items: recordArray(source.paths).map((item) => pickFields(item, ["path_id", "title", "summary", "lifecycle", "writer_instruction", "selected_event_ids"])),
+      items: recordArray(source.paths).map((item) => ({
+        ...pickFields(item, ["path_id", "session_id", "title", "summary", "lifecycle", "writer_instruction"]),
+        // Expanded, author-ordered events (doc 25 §3.3). pickFields only copies
+        // defined keys, so shape the nested events explicitly to keep step/title.
+        events: recordArray(item.events).map((event) =>
+          pickFields(event, ["event_id", "step", "title", "summary", "kind", "state_changes"])
+        )
+      })),
       ...(source.selection_required === true ? { selection_required: true } : {}),
       ...(typeof source.canon_status === "string" ? { canon_status: source.canon_status } : {})
     };

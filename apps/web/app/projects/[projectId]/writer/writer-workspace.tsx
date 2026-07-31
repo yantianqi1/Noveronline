@@ -29,6 +29,7 @@ import type {
   WriterThread,
 } from "@/lib/api/writer-types";
 import { collectActiveWriterRunIds } from "@/lib/api/writer-run";
+import { fetchWorldlineSavedPaths, fetchWorldlineSessions } from "@/lib/api/worldline-client";
 
 import { WriterCanvasTop, type CanvasView } from "./writer-canvas-top";
 import { WriterEmpty } from "./writer-empty";
@@ -38,7 +39,7 @@ import { ReviewPanel } from "./review-panel";
 import { ToolsPanel } from "./tools-panel";
 import { ProjectTopbarSlot } from "../project-topbar-slot";
 import { WriterRail, buildConversationTurns, type ConversationTurn, type SettledRunInfo } from "./writer-rail";
-import { WriterComposer } from "./writer-composer";
+import { WriterComposer, type WorldlineAttachment, type WorldlineMentionOption } from "./writer-composer";
 import { ProposalRail } from "./proposal-rail";
 import { ConversationReviewFlip } from "./composer-review-flip";
 
@@ -75,6 +76,11 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
 
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
+  // Worldline attach for the next run (doc 25): the saved worldline paths offered
+  // to `@`, plus the one the author attached. Cleared once its run starts.
+  const [worldlineOptions, setWorldlineOptions] = useState<WorldlineMentionOption[]>([]);
+  const [worldlineLoadError, setWorldlineLoadError] = useState<string | null>(null);
+  const [attachedWorldline, setAttachedWorldline] = useState<WorldlineAttachment | null>(null);
   // Block metadata for the whole project — feeds the chapters structure view's
   // per-chapter word counts without re-reading bodies.
   const [blockMetas, setBlockMetas] = useState<ManuscriptBlockMeta[]>([]);
@@ -191,6 +197,8 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
 
   useEffect(() => {
     const sel = readSelectionFor(projectId);
+    setAttachedWorldline(null);
+    setWorldlineOptions([]);
     if (!sel) {
       setState({ status: "no-selection" });
       return;
@@ -262,6 +270,60 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
       cancelled = true;
     };
   }, [projectId, loadStructure, router]);
+
+  // Load this project's worldlines for the composer's `@`-attach: saved paths
+  // (named, carry a path_id for deep-read) PLUS raw simulation sessions (so an
+  // author who ran a simulation but never saved a path can still `@` it). Paths
+  // win on session-id collision; sessions are the fallback. Each option carries
+  // its adopted (canon) event count so an empty worldline is flagged "暂无已采纳
+  // 事件" — attaching it would follow nothing. A failed read stays visible.
+  useEffect(() => {
+    if (!selection) {
+      setWorldlineOptions([]);
+      setWorldlineLoadError(null);
+      return;
+    }
+    let cancelled = false;
+    setWorldlineLoadError(null);
+    void Promise.all([
+      fetchWorldlineSavedPaths(selection.project_id, selection.tenant_id),
+      fetchWorldlineSessions(selection.project_id, selection.tenant_id),
+    ])
+      .then(([paths, sessions]) => {
+        if (cancelled) return;
+        const options: WorldlineMentionOption[] = [];
+        const seenSessions = new Set<string>();
+        for (const path of paths) {
+          seenSessions.add(path.session_id);
+          options.push({
+            session_id: path.session_id,
+            path_id: path.path_id,
+            title: path.title,
+            summary: path.summary,
+            canon_count: sessions.find((session) => session.session_id === path.session_id)?.canon_event_count ?? 0,
+          });
+        }
+        for (const session of sessions) {
+          if (seenSessions.has(session.session_id)) continue;
+          options.push({
+            session_id: session.session_id,
+            title: session.goal_summary?.trim() || `推演 ${session.current_step} 步`,
+            summary: `世界线推演 · 第 ${session.current_step} 步`,
+            canon_count: session.canon_event_count,
+          });
+        }
+        setWorldlineOptions(options);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setWorldlineOptions([]);
+          setWorldlineLoadError("读取世界线列表失败，请稍后重试。");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selection]);
 
   // ── Load the active chapter's segments (each block's body) ─────────────
 
@@ -509,12 +571,20 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
         mode: "draft",
         instruction: text,
         chapter_id: activeChapterId ?? undefined,
+        // Attach the worldline the author `@`'d: its adopted canon events become
+        // the plot timeline this run follows (doc 25).
+        worldline_session_ids: attachedWorldline ? [attachedWorldline.session_id] : undefined,
+        worldline_path_ids: attachedWorldline?.path_id ? [attachedWorldline.path_id] : undefined,
       });
+      // The attach is single-run: clear once its run has started.
+      setAttachedWorldline(null);
       const taskTurnId = `task-${run.run_id}`;
       liveTurnIdsRef.current.add(taskTurnId);
       setTurns((prev) => [...prev, { kind: "task", id: taskTurnId, runId: run.run_id }]);
       setActiveRunIds((prev) => new Set(prev).add(run.run_id));
     } catch (error) {
+      liveTurnIdsRef.current.delete(turnId);
+      setTurns((prev) => prev.filter((turn) => turn.id !== turnId));
       setActionError(error instanceof Error ? error.message : "没能开始起草，请重试。");
     }
   }
@@ -737,6 +807,10 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
                     onSend={handleSend}
                     disabled={!csrfToken || anyLive}
                     placeholder={anyLive ? "合著者起草中，完成后继续…" : undefined}
+                    worldlineOptions={worldlineOptions}
+                    worldlineLoadError={worldlineLoadError}
+                    attachedWorldline={attachedWorldline}
+                    onAttachWorldline={setAttachedWorldline}
                   />
                 </div>
               )}

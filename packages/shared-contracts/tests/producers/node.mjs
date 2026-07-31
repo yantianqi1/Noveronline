@@ -10,6 +10,7 @@ process.stdout.write(JSON.stringify({
     chapter_id: "chapter-node",
     scene_id: "scene-node",
     instruction: "Continue the current scene.",
+    worldline_session_ids: ["session-node"],
     options: { module_key: "writer_composer", review_after_write: false }
   },
   writer_runtime_event: {
@@ -30,6 +31,7 @@ process.stdout.write(JSON.stringify({
     selected_asset_ids: ["asset-node"],
     graph_node_ids: ["node-node"],
     worldline_path_ids: ["path-node"],
+    worldline_session_ids: ["session-node"],
     tool_name: "query_graph_neighbors"
   },
   writer_public_event: {

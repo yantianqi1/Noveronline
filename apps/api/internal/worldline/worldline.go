@@ -18,6 +18,12 @@ type ListSavedPathsInput struct {
 	ProjectID string
 }
 
+type GetSavedPathInput struct {
+	TenantID  string
+	ProjectID string
+	PathID    string
+}
+
 type SavedPathRecord struct {
 	PathID            string   `json:"path_id"`
 	SessionID         string   `json:"session_id"`
@@ -33,6 +39,7 @@ type SavedPathRecord struct {
 
 type SavedPathReader interface {
 	ListSavedPaths(context.Context, ListSavedPathsInput) ([]SavedPathRecord, error)
+	GetSavedPath(context.Context, GetSavedPathInput) (SavedPathRecord, error)
 }
 
 type CreateSavedPathInput struct {
@@ -114,10 +121,13 @@ type SessionRecord struct {
 	// CurrentStep is the latest domain step this session produced
 	// (MAX(worldline_events.step)); the single public "第 X 步" anchor. The
 	// orchestration workflow_events.sequence stays internal.
-	CurrentStep int    `json:"current_step"`
-	CreatedBy   string `json:"created_by"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	CurrentStep int `json:"current_step"`
+	// CanonEventCount lets clients label empty writer timelines without an
+	// additional event request for every listed session.
+	CanonEventCount int    `json:"canon_event_count"`
+	CreatedBy       string `json:"created_by"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
 }
 
 type SessionReader interface {
@@ -359,6 +369,13 @@ func NewDisabledSavedPathReader() *DisabledSavedPathReader {
 
 func (r *DisabledSavedPathReader) ListSavedPaths(context.Context, ListSavedPathsInput) ([]SavedPathRecord, error) {
 	return nil, &AppError{
+		Code:    "WORLDLINE_BACKEND_UNCONFIGURED",
+		Message: "worldline backend is not configured",
+	}
+}
+
+func (r *DisabledSavedPathReader) GetSavedPath(context.Context, GetSavedPathInput) (SavedPathRecord, error) {
+	return SavedPathRecord{}, &AppError{
 		Code:    "WORLDLINE_BACKEND_UNCONFIGURED",
 		Message: "worldline backend is not configured",
 	}
@@ -902,6 +919,52 @@ LIMIT $3`
 	return records, nil
 }
 
+func (r *SQLSavedPathReader) GetSavedPath(ctx context.Context, input GetSavedPathInput) (SavedPathRecord, error) {
+	tenantID := strings.TrimSpace(input.TenantID)
+	projectID := strings.TrimSpace(input.ProjectID)
+	pathID := strings.TrimSpace(input.PathID)
+	if tenantID == "" || projectID == "" || pathID == "" {
+		return SavedPathRecord{}, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id, project_id, and path_id are required"}
+	}
+	if r.queryer == nil {
+		return SavedPathRecord{}, &AppError{Code: "WORLDLINE_BACKEND_UNCONFIGURED", Message: "worldline backend is not configured"}
+	}
+
+	query := `
+SELECT
+  path_id::text,
+  session_id::text,
+  project_id::text,
+  title,
+  COALESCE(summary, ''),
+  lifecycle,
+  COALESCE(selected_event_ids_jsonb, '[]'::jsonb)::text,
+  COALESCE(writer_instruction, ''),
+  created_at::text,
+  updated_at::text
+FROM worldline_saved_paths
+WHERE tenant_id::text = $1
+  AND project_id::text = $2
+  AND path_id::text = $3
+LIMIT 1`
+	rows, err := queryWorldlineTenantSQL(ctx, r.queryer, tenantID, query, tenantID, projectID, pathID)
+	if err != nil {
+		return SavedPathRecord{}, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return SavedPathRecord{}, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
+		}
+		return SavedPathRecord{}, &AppError{Code: "NOT_FOUND", Message: "worldline saved path not found"}
+	}
+	record, err := scanSavedPathRecord(rows)
+	if err != nil {
+		return SavedPathRecord{}, err
+	}
+	return record, nil
+}
+
 func scanSavedPathRecord(rows SQLRows) (SavedPathRecord, error) {
 	var record SavedPathRecord
 	var eventIDsJSON string
@@ -1428,6 +1491,14 @@ SELECT
       AND e.project_id = s.project_id
       AND e.session_id = s.session_id
   ), 0) AS current_step,
+  COALESCE((
+    SELECT COUNT(*)
+    FROM worldline_events e
+    WHERE e.tenant_id = s.tenant_id
+      AND e.project_id = s.project_id
+      AND e.session_id = s.session_id
+      AND e.status = 'canon'
+  ), 0) AS canon_event_count,
   COALESCE(s.created_by::text, ''),
   s.created_at::text,
   s.updated_at::text
@@ -1460,6 +1531,7 @@ func scanSessionRecord(rows SQLRows) (SessionRecord, error) {
 		&record.GoalSummary,
 		&record.AnchorPathID,
 		&record.CurrentStep,
+		&record.CanonEventCount,
 		&record.CreatedBy,
 		&record.CreatedAt,
 		&record.UpdatedAt,

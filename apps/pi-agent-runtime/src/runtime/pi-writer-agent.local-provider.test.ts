@@ -48,7 +48,7 @@ describe("Pi writer local OpenAI-compatible provider E2E", () => {
       module_key: "writer_orchestrator",
       provider_call_id: "pi-writer:v1:writer_orchestrator:orchestrator:0:stable",
       mode: "draft",
-      selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [], tool_names: ["query_project_context"],
+      selected_asset_ids: [], graph_node_ids: [], worldline_path_ids: [], worldline_session_ids: [], tool_names: ["query_project_context"],
       runtime_context: {
         tenant_id: "ten-local",
         project_id: "proj-local",
@@ -137,6 +137,7 @@ describe("Pi writer local OpenAI-compatible provider E2E", () => {
       selected_asset_ids: [],
       graph_node_ids: [],
       worldline_path_ids: [],
+      worldline_session_ids: [],
       tool_names: ["query_project_context" as const],
       executeTool: async () => {
         executeCalls += 1;

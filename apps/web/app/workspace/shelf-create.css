@@ -1,0 +1,64 @@
+/*
+ * Create-project panel — a "新卷登记" folio spread on the study shelf.
+ * Warm xuan-paper surface with a faint fiber grain, a mounted inner hairline
+ * frame (册页 style), and a small vermilion seal chip marking the registry
+ * slip. Colours come from the paper & vermilion tokens; the one non-token
+ * texture tint is a local property below.
+ */
+
+.shelf-create {
+  --sc-fiber: rgba(86, 69, 45, 0.02);
+  position: relative;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-modal);
+  background:
+    radial-gradient(150% 90% at 12% 0%, var(--color-candidate-wash), transparent 55%),
+    repeating-linear-gradient(0deg, var(--sc-fiber) 0 1px, transparent 1px 5px),
+    linear-gradient(180deg, var(--color-panel), color-mix(in srgb, var(--color-panel) 55%, var(--color-paper-deep)));
+  box-shadow:
+    var(--shadow-hairline),
+    0 18px 40px -26px rgba(86, 69, 45, 0.4);
+}
+
+/* Mounted inner frame, like the border of a bound folio leaf. */
+.shelf-create::before {
+  content: "";
+  position: absolute;
+  inset: 7px;
+  border: 1px solid var(--color-line-soft);
+  border-radius: calc(var(--radius-modal) - 7px);
+  pointer-events: none;
+}
+
+/* Small vermilion seal stamp beside the heading. */
+.shelf-create-seal {
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  flex: none;
+  font-family: var(--font-serif);
+  font-size: var(--text-md);
+  line-height: 1;
+  color: var(--color-panel);
+  background: linear-gradient(155deg, var(--color-accent-soft), var(--color-accent) 55%, var(--color-accent-strong));
+  border-radius: 4px;
+  transform: rotate(-4deg);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 253, 248, 0.28),
+    var(--shadow-accent);
+  user-select: none;
+}
+
+/* The shared Select shrink-wraps in an inline-flex wrapper; the folio form
+ * wants the full measure, matching the Input above it. */
+.shelf-create-select > div {
+  display: flex;
+  width: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shelf-create-seal {
+    transform: none;
+  }
+}

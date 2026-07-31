@@ -84,6 +84,7 @@ export function createPostgresPiWriterDeps(options: PostgresPiWriterDepsOptions)
     executeWriterTool: async (request) => executeWriterTool(options, request),
     loadConsistencyCanon: async (request) => loadConsistencyCanon(options, request),
     loadAlwaysOnAssets: async (request) => loadAlwaysOnAssets(options, request),
+    loadWorldlineTimeline: async (request) => loadWorldlineTimeline(options, request),
     resolveCredential: async (request) => resolveCredential(options, request),
     reserveLLMQuota: async (request) => quota.reserve(request),
     finalizeLLMQuota: async (request) => quota.finalize(request),
@@ -531,14 +532,64 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
       if (pathIds.length === 0) {
         return { paths: [], canon_status: "reference_only", selection_required: true };
       }
+      // Read the saved paths WITH their selected_event_ids + session so we can
+      // expand each path into its ordered events (doc 25 §3.3). The author picked
+      // these events when saving the path; surfacing them here lets the writer
+      // deep-read a path mid-run instead of only seeing its summary.
       const result = await queryWithTenantContext<Record<string, unknown>>(db, request,
-        `SELECT path_id::text, title, summary, lifecycle, writer_instruction
+        `SELECT path_id::text, session_id::text, title, summary, lifecycle, writer_instruction,
+                COALESCE(selected_event_ids_jsonb, '[]'::jsonb)::text AS selected_event_ids
            FROM worldline_saved_paths
           WHERE tenant_id = $1 AND project_id = $2
             AND path_id = ANY($3::uuid[])
           ORDER BY updated_at DESC LIMIT 20`,
         [request.tenant_id, request.project_id, pathIds]);
-      return { paths: result.rows, canon_status: "reference_only" };
+
+      // Expand the union of all selected event ids into their worldline_events
+      // rows in one query, then re-thread them per path in the author's saved
+      // order. Only adopted (canon) events are surfaced; candidates stay walled.
+      const allEventIds = [
+        ...new Set(
+          result.rows.flatMap((row) => parseStringArrayColumn(row.selected_event_ids))
+        )
+      ];
+      const eventsById = new Map<string, Record<string, unknown>>();
+      if (allEventIds.length > 0) {
+        const eventRows = await queryWithTenantContext<Record<string, unknown>>(db, request,
+          `SELECT e.event_id::text, e.step, e.title, e.summary, e.kind,
+                  COALESCE(e.state_changes_jsonb, '{}'::jsonb)::text AS state_changes
+             FROM worldline_events e
+            WHERE e.tenant_id = $1 AND e.project_id = $2
+              AND e.event_id = ANY($3::uuid[])
+              AND e.status = 'canon'`,
+          [request.tenant_id, request.project_id, allEventIds]);
+        for (const eventRow of eventRows.rows) {
+          eventsById.set(String(eventRow.event_id), eventRow);
+        }
+      }
+      const paths = result.rows.map((row) => {
+        const orderedIds = parseStringArrayColumn(row.selected_event_ids);
+        return {
+          path_id: row.path_id,
+          session_id: row.session_id,
+          title: row.title,
+          summary: row.summary,
+          lifecycle: row.lifecycle,
+          writer_instruction: row.writer_instruction,
+          events: orderedIds
+            .map((id) => eventsById.get(id))
+            .filter((event): event is Record<string, unknown> => Boolean(event))
+            .map((event) => ({
+              event_id: event.event_id,
+              step: event.step,
+              title: event.title,
+              summary: event.summary,
+              kind: event.kind,
+              state_changes: publicWorldlineStateChanges(event.state_changes)
+            }))
+        };
+      });
+      return { paths, canon_status: "reference_only" };
     }
     case "query_manuscript_context": {
       return queryManuscriptContext(db, request);
@@ -1077,6 +1128,66 @@ async function loadAlwaysOnAssets(
     channel: "always_on"
   }));
   return { assets };
+}
+
+// Deterministic plot-timeline prefetch (doc 25 §3.2): for each worldline
+// session the author attached, load the ADOPTED (status='canon') events ordered
+// by step so the writer can sequence prose against them. Only canon events ever
+// surface — candidate/rejected simulation events stay walled off, and the block
+// is injected as reference-only so worldline never silently becomes canon. This
+// runs at run start, NOT gated on the orchestrator choosing to call a tool.
+async function loadWorldlineTimeline(
+  options: PostgresPiWriterDepsOptions,
+  request: ExecuteWriterToolRequest
+): Promise<{ timelines: import("../activities/pi-writer-activities.js").WorldlineTimeline[] }> {
+  const db = options.db;
+  const sessionIds = Array.isArray(request.worldline_session_ids)
+    ? request.worldline_session_ids.filter((id): id is string => typeof id === "string" && id.trim() !== "")
+    : [];
+  if (sessionIds.length === 0) {
+    return { timelines: [] };
+  }
+  const rows = (
+    await queryWithTenantContext<Record<string, unknown>>(
+      db,
+      request,
+      `SELECT e.event_id::text, e.session_id::text, e.step, e.title, e.summary, e.kind,
+              COALESCE(e.state_changes_jsonb, '{}'::jsonb)::text AS state_changes
+         FROM worldline_events e
+        WHERE e.tenant_id = $1 AND e.project_id = $2
+          AND e.session_id = ANY($3::uuid[])
+          AND e.status = 'canon'
+        ORDER BY e.session_id, e.step ASC, e.created_at ASC`,
+      [request.tenant_id, request.project_id, sessionIds]
+    )
+  ).rows;
+
+  const bySession = new Map<string, import("../activities/pi-writer-activities.js").WorldlineTimelineEvent[]>();
+  for (const row of rows) {
+    const sessionId = String(row.session_id);
+    const event: import("../activities/pi-writer-activities.js").WorldlineTimelineEvent = {
+      event_id: String(row.event_id),
+      session_id: sessionId,
+      step: typeof row.step === "number" ? row.step : Number(row.step) || 0,
+      title: typeof row.title === "string" ? row.title : "",
+      summary: typeof row.summary === "string" ? row.summary : "",
+      kind: typeof row.kind === "string" ? row.kind : "",
+      state_changes: publicWorldlineStateChanges(row.state_changes)
+    };
+    const bucket = bySession.get(sessionId);
+    if (bucket) {
+      bucket.push(event);
+    } else {
+      bySession.set(sessionId, [event]);
+    }
+  }
+  // Preserve the author's attached-session order; sessions with no canon events
+  // still surface (empty) so the run visibly reports an empty timeline.
+  const timelines = sessionIds.map((sessionId) => ({
+    session_id: sessionId,
+    events: bySession.get(sessionId) ?? []
+  }));
+  return { timelines };
 }
 
 // Load the canon a draft is checked against for consistency (doc 41 §4.7):
@@ -2411,6 +2522,14 @@ function objectValue(value: unknown): Record<string, unknown> {
   return {};
 }
 
+/** Public worldline state changes are metadata only; strip body-like fields. */
+function publicWorldlineStateChanges(value: unknown): Record<string, unknown> {
+  const sanitized = sanitizePublicRuntimePayload(objectValue(value));
+  return sanitized && typeof sanitized === "object" && !Array.isArray(sanitized)
+    ? sanitized as Record<string, unknown>
+    : {};
+}
+
 function arrayValue(value: unknown): unknown[] {
   if (Array.isArray(value)) return value;
   if (typeof value === "string") {
@@ -2422,4 +2541,9 @@ function arrayValue(value: unknown): unknown[] {
     }
   }
   return [];
+}
+
+/** Parse a jsonb text/array column of string ids (e.g. selected_event_ids_jsonb). */
+function parseStringArrayColumn(value: unknown): string[] {
+  return arrayValue(value).filter((item): item is string => typeof item === "string" && item.trim() !== "");
 }

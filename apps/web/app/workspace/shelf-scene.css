@@ -1,0 +1,385 @@
+/*
+ * Shelf scene — the /workspace landing reimagined as a warm study.
+ *
+ * Scoped to app/workspace; class prefix `shelf-scene`. The wall is layered
+ * pure-CSS light — a lamp glow falling from the top of the room, a soft
+ * vignette at the edges, a barely-there laid-paper texture — painted over the
+ * --color-paper base the root element keeps. Each tenant becomes one walnut
+ * shelf: a studded plaque above a flex row of standing volumes (project-card.tsx
+ * renders the book itself; shelf-book.css owns its size contract), with a wooden
+ * plank tiled directly under every wrapped line (see .shelf-scene-row::after).
+ * No images, no new dependencies; the wood tones below are scene-local custom
+ * properties, not design tokens.
+ */
+
+.shelf-scene {
+  --shelf-wood-hi: #dcb482;
+  --shelf-wood-top: #bd9060;
+  --shelf-wood-mid: #875c39;
+  --shelf-wood-deep: #5b3c23;
+  --shelf-wood-line: rgba(43, 26, 12, 0.55);
+  --shelf-cast: rgba(62, 42, 22, 0.4);
+
+  background-image:
+    /* lamp glow falling from the top of the room */
+    radial-gradient(64% 34% at 50% -8%, rgba(255, 243, 214, 0.95), rgba(255, 243, 214, 0) 72%),
+    /* faint warm spill to the upper left */
+    radial-gradient(46% 30% at 16% 2%, rgba(255, 236, 200, 0.3), rgba(255, 236, 200, 0) 70%),
+    /* vignette pulling the edges of the wall inward */
+    radial-gradient(130% 96% at 50% 36%, rgba(74, 54, 30, 0) 56%, rgba(74, 54, 30, 0.14) 100%),
+    /* laid-paper grain, barely there */
+    repeating-linear-gradient(0deg, rgba(86, 69, 45, 0.022) 0 1px, rgba(86, 69, 45, 0) 1px 5px),
+    repeating-linear-gradient(90deg, rgba(86, 69, 45, 0.018) 0 1px, rgba(86, 69, 45, 0) 1px 5px);
+  background-attachment: fixed;
+}
+
+/* ── One shelf layer: plaque + book row + plank ────────────────────────── */
+.shelf-scene-layer {
+  position: relative;
+}
+
+/* Tenant name as a small studded plaque hung above the shelf. */
+.shelf-scene-plaque {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.7em;
+  padding: 0.42rem 1.05rem;
+  color: var(--color-paper);
+  background:
+    linear-gradient(to bottom, rgba(255, 235, 196, 0.16), rgba(255, 235, 196, 0) 45%),
+    linear-gradient(to bottom, #6d4a2c, #50341d);
+  border: 1px solid var(--shelf-wood-line);
+  border-radius: 4px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 232, 190, 0.28),
+    inset 0 -1px 0 rgba(43, 26, 12, 0.5),
+    0 7px 16px -7px var(--shelf-cast);
+  text-shadow: 0 1px 2px rgba(30, 18, 8, 0.65);
+}
+
+/* brass studs pinning the plaque to the wall */
+.shelf-scene-plaque::before,
+.shelf-scene-plaque::after {
+  content: "";
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #eed09a, #8a5f30 72%);
+  box-shadow: inset 0 1px 1px rgba(43, 26, 12, 0.6);
+}
+
+/* ── Book row — volumes stand bottom-aligned on per-line planks ────────── */
+.shelf-scene-row {
+  /* Shared sizing for the plank tiling below: every item in the row is the
+   * same intrinsic box (width clamp(8.75rem, 11vw, 10.5rem), aspect-ratio
+   * 5/7), so every wrapped flex line is exactly one book tall and the planks
+   * can repeat on a fixed vertical period, one directly under each line. */
+  --shelf-book-h: calc(clamp(8.75rem, 11vw, 10.5rem) * 1.4);
+  --shelf-gap-y: 1.75rem;
+  --shelf-bh: clamp(12px, 1.5vw, 16px);
+
+  position: relative;
+  isolation: isolate; /* the plank overlay layers only within this row */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--shelf-gap-y) clamp(0.55rem, 1.3vw, 0.9rem);
+  padding-inline: 0.35rem;
+  /* room under the last line for its own plank + wall shadow, keeping the row
+   * box an exact multiple of the plank-tiling period */
+  padding-bottom: var(--shelf-gap-y);
+}
+
+.shelf-scene-row > * {
+  flex: 0 0 auto;
+}
+
+/*
+ * Per-line walnut planks, painted as one repeating tile. The tile period is
+ * book height + row gap, so a plank band lands directly under every wrapped
+ * line — contact shade, lit top surface, dark front face, then the soft
+ * shadow fading back into the wall. The overlay paints above the books, so
+ * the entrance rise still emerges from behind the shelf.
+ */
+.shelf-scene-row::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  inset: 0 -0.65rem; /* slightly wider than the book row */
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent var(--shelf-book-h),
+    rgba(43, 26, 12, 0.5) calc(var(--shelf-book-h) + 1px),
+    var(--shelf-wood-hi) calc(var(--shelf-book-h) + 2px),
+    var(--shelf-wood-top) calc(var(--shelf-book-h) + 5px),
+    var(--shelf-wood-mid) calc(var(--shelf-book-h) + var(--shelf-bh) * 0.58),
+    var(--shelf-wood-deep) calc(var(--shelf-book-h) + var(--shelf-bh)),
+    rgba(62, 42, 22, 0.26) calc(var(--shelf-book-h) + var(--shelf-bh) + 2px),
+    transparent calc(var(--shelf-book-h) + var(--shelf-gap-y))
+  );
+  pointer-events: none;
+}
+
+/* keep the whole focus ring visible above the plank overlay */
+.shelf-scene-row > *:focus-visible {
+  z-index: 2;
+}
+
+/* ── Walnut plank — standalone board for the empty/error study stages ──── */
+.shelf-scene-plank {
+  position: relative;
+  height: clamp(12px, 1.5vw, 16px);
+  margin: 0;
+  border-radius: 3px;
+  background:
+    /* lengthwise grain streaks */
+    repeating-linear-gradient(93deg, rgba(43, 26, 12, 0.12) 0 1px, rgba(43, 26, 12, 0) 1px 7px),
+    repeating-linear-gradient(87deg, rgba(255, 226, 178, 0.05) 0 1px, rgba(255, 226, 178, 0) 1px 11px),
+    /* contact shade, lit top surface, then the dark front face */
+    linear-gradient(
+      to bottom,
+      rgba(43, 26, 12, 0.5) 0,
+      var(--shelf-wood-hi) 2px,
+      var(--shelf-wood-top) 5px,
+      var(--shelf-wood-mid) 58%,
+      var(--shelf-wood-deep) 100%
+    );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 233, 196, 0.55),
+    inset 0 -2px 3px rgba(43, 26, 12, 0.4),
+    inset 16px 0 20px -16px rgba(43, 26, 12, 0.55),
+    inset -16px 0 20px -16px rgba(43, 26, 12, 0.55),
+    0 14px 24px -9px var(--shelf-cast),
+    0 4px 8px -3px rgba(62, 42, 22, 0.3);
+}
+
+/* ── Empty slot — a dashed bookend holding a place for the next volume ─── */
+.shelf-scene-slot {
+  /* same size contract as the books (shelf-book.css) */
+  width: clamp(8.75rem, 11vw, 10.5rem);
+  aspect-ratio: 5 / 7;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.7rem;
+  padding: 0.5rem;
+  color: var(--color-muted);
+  background: color-mix(in srgb, var(--color-panel) 58%, transparent);
+  border: 1.5px dashed var(--color-line);
+  border-radius: 3px 8px 8px 3px;
+  cursor: pointer;
+  transition:
+    border-color var(--duration-med) var(--ease-paper),
+    background-color var(--duration-med) var(--ease-paper),
+    color var(--duration-med) var(--ease-paper),
+    box-shadow var(--duration-med) var(--ease-paper);
+}
+
+.shelf-scene-slot:hover {
+  color: var(--color-accent-strong);
+  background: var(--color-accent-wash);
+  border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+  box-shadow: 0 16px 26px -14px var(--shelf-cast);
+}
+
+.shelf-scene-slot-mark {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border: 1px dashed var(--color-line);
+  border-radius: 50%;
+  transition:
+    border-color var(--duration-med) var(--ease-paper),
+    color var(--duration-med) var(--ease-paper);
+}
+
+.shelf-scene-slot:hover .shelf-scene-slot-mark {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+/* vertical title echoing the books' 题签 */
+.shelf-scene-slot-title {
+  writing-mode: vertical-rl;
+  letter-spacing: 0.32em;
+}
+
+/* ── Empty study stage — bare plank, quill, paperweight ────────────────── */
+.shelf-scene-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 2.75rem 1.5rem 3.75rem;
+  text-align: center;
+}
+
+.shelf-scene-empty-copy {
+  max-width: 22.5rem;
+  margin-inline: auto;
+}
+
+.shelf-scene-empty-stage {
+  position: relative;
+  width: min(26rem, 88%);
+  height: 8rem;
+}
+
+.shelf-scene-empty-plank {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  margin: 0;
+}
+
+.shelf-scene-empty-quill {
+  position: absolute;
+  bottom: 15px;
+  left: 23%;
+  width: 46px;
+  height: 46px;
+  color: var(--color-muted-soft);
+  transform: rotate(-14deg);
+  filter: drop-shadow(0 4px 5px rgba(62, 42, 22, 0.35));
+}
+
+.shelf-scene-empty-stone {
+  position: absolute;
+  right: 24%;
+  bottom: 13px;
+  width: 26px;
+  height: 24px;
+  border-radius: 48% 52% 46% 54% / 62% 64% 36% 38%;
+  background: radial-gradient(circle at 34% 26%, #eadfc9, #b7a482 58%, #8b7859);
+  box-shadow:
+    inset 0 -3px 5px rgba(70, 52, 30, 0.35),
+    0 4px 7px -3px rgba(62, 42, 22, 0.5);
+}
+
+/* ── Error stage — two volumes toppled on the plank ────────────────────── */
+.shelf-scene-fallen {
+  position: absolute;
+  bottom: 14px;
+  border-radius: 3px;
+  background: linear-gradient(to bottom, #c3b299, #97866a);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 240, 214, 0.4),
+    inset 5px 0 6px -3px rgba(43, 26, 12, 0.45),
+    0 5px 9px -4px rgba(62, 42, 22, 0.5);
+}
+
+.shelf-scene-fallen-a {
+  left: 30%;
+  width: 74px;
+  height: 21px;
+  transform: rotate(-8deg);
+}
+
+.shelf-scene-fallen-b {
+  left: 47%;
+  bottom: 15px;
+  width: 58px;
+  height: 17px;
+  background: linear-gradient(to bottom, #b3a28a, #87765c);
+  transform: rotate(5deg);
+}
+
+/* ── Skeleton — grey stand-in volumes breathing on the plank ───────────── */
+.shelf-scene-ghost {
+  width: clamp(8.75rem, 11vw, 10.5rem);
+  aspect-ratio: 5 / 7;
+  border-radius: 3px 8px 8px 3px;
+  background: linear-gradient(
+    160deg,
+    var(--color-paper-deep),
+    color-mix(in srgb, var(--color-line-soft) 65%, var(--color-paper-deep))
+  );
+  box-shadow:
+    inset 0 0 0 1px var(--color-line-soft),
+    inset 6px 0 8px -6px rgba(62, 42, 22, 0.3),
+    0 8px 14px -10px rgba(62, 42, 22, 0.4);
+  transform-origin: bottom;
+  animation: shelf-scene-breathe 1.7s var(--ease-paper) infinite;
+}
+
+.shelf-scene-ghost:nth-child(2) {
+  transform: scaleY(0.94);
+  animation-delay: 0.12s;
+}
+
+.shelf-scene-ghost:nth-child(3) {
+  transform: scaleY(0.97);
+  animation-delay: 0.24s;
+}
+
+.shelf-scene-ghost:nth-child(4) {
+  transform: scaleY(0.9);
+  animation-delay: 0.36s;
+}
+
+.shelf-scene-ghost:nth-child(5) {
+  transform: scaleY(0.95);
+  animation-delay: 0.48s;
+}
+
+.shelf-scene-skel-bar {
+  border-radius: var(--radius-control);
+  background: linear-gradient(
+    90deg,
+    var(--color-line-soft),
+    color-mix(in srgb, var(--color-line-soft) 55%, var(--color-paper-deep))
+  );
+  animation: shelf-scene-breathe 1.7s var(--ease-paper) infinite;
+}
+
+.shelf-scene-skel-bar-eyebrow {
+  width: 4rem;
+  height: 0.75rem;
+}
+
+.shelf-scene-skel-bar-title {
+  width: 14rem;
+  height: 2.25rem;
+  margin-top: 0.8rem;
+  animation-delay: 0.1s;
+}
+
+.shelf-scene-skel-bar-copy {
+  width: 18rem;
+  height: 1rem;
+  margin-top: 0.8rem;
+  animation-delay: 0.2s;
+}
+
+.shelf-scene-skel-bar-plaque {
+  width: 9rem;
+  height: 2rem;
+  border-radius: 4px;
+  animation-delay: 0.3s;
+}
+
+@keyframes shelf-scene-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shelf-scene-slot,
+  .shelf-scene-slot-mark {
+    transition: none;
+  }
+
+  .shelf-scene-ghost,
+  .shelf-scene-skel-bar {
+    animation: none;
+  }
+}

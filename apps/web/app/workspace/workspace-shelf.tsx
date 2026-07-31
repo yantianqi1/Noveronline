@@ -1,6 +1,6 @@
 "use client";
 
-import { AnimatePresence, motion } from "motion/react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Feather, Plus, RefreshCw } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
@@ -18,6 +18,7 @@ import {
 import { CreateProjectPanel } from "./create-project-panel";
 import { ProjectCard } from "./project-card";
 import { UserMenu } from "./user-menu";
+import "./shelf-scene.css";
 
 type LoadState =
   | { status: "loading" }
@@ -28,9 +29,10 @@ type LoadState =
  * The workspace shelf — the landing surface after sign-in.
  *
  * Fetches `GET /v1/me` (via the BFF) for the user plus every tenant/project
- * they belong to, then lays projects out as volumes grouped by workspace.
- * Picking a volume stores the {tenant_id, project_id} selection and routes
- * into that project's workspace.
+ * they belong to, then lays the room out as a warm study (see shelf-scene.css):
+ * each tenant is one walnut shelf — a plaque, a row of standing volumes, and
+ * a plank. Picking a volume stores the {tenant_id, project_id} selection and
+ * routes into that project's workspace.
  */
 export function WorkspaceShelf() {
   const router = useRouter();
@@ -82,7 +84,7 @@ export function WorkspaceShelf() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-paper">
+    <div className="shelf-scene flex min-h-screen flex-col bg-paper">
       {/* ── Top bar ─────────────────────────────────────────────────── */}
       <header className="sticky top-0 z-30 border-b border-line bg-paper/85 backdrop-blur-md">
         <div className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between gap-4 px-6">
@@ -100,7 +102,7 @@ export function WorkspaceShelf() {
       </header>
 
       {/* ── Shelf body ──────────────────────────────────────────────── */}
-      <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-10">
+      <main className="mx-auto w-full max-w-6xl flex-1 px-6 pb-24 pt-10">
         <AnimatePresence mode="wait">
           {state.status === "loading" ? (
             <ShelfSkeleton key="loading" />
@@ -133,7 +135,10 @@ function ShelfContent({
   const total = projectCount(currentUser);
   const creatableTenants = manageableTenants(currentUser);
   const [createOpen, setCreateOpen] = useState(false);
-  let cardIndex = 0;
+  // Stagger index runs across tenant boundaries so the whole room rises in
+  // sequence; each layer owns a contiguous run (slot included, matching the
+  // previous single-loop numbering).
+  let nextIndex = 0;
 
   return (
     <motion.div
@@ -195,39 +200,67 @@ function ShelfContent({
           />
         )
       ) : (
-        <div className="space-y-11">
-          {groups.map(({ tenant, projects }) => (
-            <section key={tenant.tenant_id}>
-              {/* workspace divider */}
-              <div className="mb-5 flex items-center gap-3">
-                <h2 className="text-sm font-medium tracking-label text-muted">
-                  {tenant.name}
-                </h2>
-                <span className="h-px flex-1 bg-line-soft" />
-                <span className="text-caption text-muted-soft">{projects.length} 部</span>
-              </div>
-              <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
-                {projects.map((project) => {
-                  const index = cardIndex;
-                  cardIndex += 1;
-                  return (
-                    <ProjectCard
-                      key={project.project_id}
-                      project={project}
-                      index={index}
-                      onOpen={onOpen}
-                    />
-                  );
-                })}
-                {canCreateInTenant(creatableTenants, tenant.tenant_id) ? (
-                  <CreateVolumeCard index={cardIndex} onClick={() => setCreateOpen(true)} />
-                ) : null}
-              </div>
-            </section>
-          ))}
+        <div className="space-y-14">
+          {groups.map(({ tenant, projects }) => {
+            const startIndex = nextIndex;
+            nextIndex += projects.length;
+            return (
+              <TenantShelf
+                key={tenant.tenant_id}
+                tenant={tenant}
+                projects={projects}
+                startIndex={startIndex}
+                canCreate={canCreateInTenant(creatableTenants, tenant.tenant_id)}
+                onOpen={onOpen}
+                onCreate={() => setCreateOpen(true)}
+              />
+            );
+          })}
         </div>
       )}
     </motion.div>
+  );
+}
+
+/** One tenant's shelf: plaque above, volumes bottom-aligned on per-line planks. */
+function TenantShelf({
+  tenant,
+  projects,
+  startIndex,
+  canCreate,
+  onOpen,
+  onCreate,
+}: {
+  tenant: TenantMembershipSummary;
+  projects: ProjectWithTenant[];
+  startIndex: number;
+  canCreate: boolean;
+  onOpen: (project: ProjectWithTenant) => void;
+  onCreate: () => void;
+}) {
+  return (
+    <section className="shelf-scene-layer">
+      {/* plaque hung above the shelf */}
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="shelf-scene-plaque font-serif text-sm tracking-label">{tenant.name}</h2>
+        <span className="text-caption text-muted-soft">{projects.length} 部</span>
+      </div>
+      {/* volumes standing on the planks, bottom-aligned by the row; each
+          wrapped line gets its own plank from shelf-scene.css */}
+      <div className="shelf-scene-row">
+        {projects.map((project, i) => (
+          <ProjectCard
+            key={project.project_id}
+            project={project}
+            index={startIndex + i}
+            onOpen={onOpen}
+          />
+        ))}
+        {canCreate ? (
+          <CreateVolumeCard index={startIndex + projects.length} onClick={onCreate} />
+        ) : null}
+      </div>
+    </section>
   );
 }
 
@@ -235,42 +268,47 @@ function canCreateInTenant(tenants: TenantMembershipSummary[], tenantId: string)
   return tenants.some((tenant) => tenant.tenant_id === tenantId);
 }
 
+/** A book-sized dashed slot standing on the plank, holding the next volume's place. */
 function CreateVolumeCard({ index, onClick }: { index: number; onClick: () => void }) {
+  const reduceMotion = useReducedMotion();
+
   return (
     <motion.button
       type="button"
       onClick={onClick}
-      initial={{ opacity: 0, y: 18 }}
+      initial={reduceMotion ? false : { opacity: 0, y: 26 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.45, delay: 0.08 + index * 0.06, ease: [0.22, 1, 0.36, 1] }}
-      whileHover={{ y: -3 }}
-      whileTap={{ scale: 0.985 }}
-      className="group flex h-full min-h-[180px] flex-col items-center justify-center gap-3 rounded-modal border border-dashed border-line bg-panel/50 p-6 text-center transition-colors hover:border-accent/50 hover:bg-accent-wash/40"
+      transition={{ duration: 0.5, delay: 0.08 + index * 0.06, ease: [0.22, 1, 0.36, 1] }}
+      whileHover={reduceMotion ? undefined : { y: -10, rotate: -2 }}
+      whileTap={reduceMotion ? undefined : { scale: 0.96 }}
+      className="shelf-scene-slot"
     >
-      <span className="grid size-10 place-items-center rounded-full border border-line bg-panel text-muted transition-colors group-hover:border-accent group-hover:text-accent">
+      <span className="shelf-scene-slot-mark" aria-hidden>
         <Plus className="size-4" aria-hidden />
       </span>
-      <span className="font-serif text-lg font-semibold text-ink group-hover:text-accent-strong">
-        新建作品
-      </span>
-      <span className="text-caption text-muted">在这个工作区开一部新小说</span>
+      <span className="shelf-scene-slot-title font-serif text-lg font-semibold">新建作品</span>
     </motion.button>
   );
 }
 
+/** An empty plank in the study: bare wood, a quill, and a paperweight. */
 function EmptyShelf({ canCreate, onCreate }: { canCreate: boolean; onCreate: () => void }) {
+  const reduceMotion = useReducedMotion();
+
   return (
     <motion.div
-      initial={{ opacity: 0, y: 12 }}
+      initial={reduceMotion ? false : { opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
-      className="flex flex-col items-center rounded-modal border border-dashed border-line bg-panel/60 px-8 py-20 text-center"
+      className="shelf-scene-empty"
     >
-      <span className="grid size-14 place-items-center rounded-full bg-accent-wash text-accent">
-        <Feather className="size-6" aria-hidden />
-      </span>
-      <h3 className="mt-5 font-serif text-xl font-semibold text-ink">还没有作品</h3>
-      <p className="mt-2 max-w-[360px] text-sm leading-relaxed text-muted">
+      <div className="shelf-scene-empty-stage" aria-hidden="true">
+        <Feather className="shelf-scene-empty-quill" aria-hidden />
+        <span className="shelf-scene-empty-stone" aria-hidden />
+        <div className="shelf-scene-plank shelf-scene-empty-plank" aria-hidden />
+      </div>
+      <h3 className="mt-8 font-serif text-xl font-semibold text-ink">还没有作品</h3>
+      <p className="shelf-scene-empty-copy mt-2 text-sm leading-relaxed text-muted">
         {canCreate
           ? "书架还是空的。写下第一部作品的名字，开始你的故事世界。"
           : "你加入的工作区里还没有任何小说项目。请联系工作区管理员为你创建第一部作品，或接受邀请加入已有的项目。"}
@@ -285,16 +323,24 @@ function EmptyShelf({ canCreate, onCreate }: { canCreate: boolean; onCreate: () 
   );
 }
 
+/** The same study stage with two toppled volumes — the shelf cannot be opened. */
 function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
+  const reduceMotion = useReducedMotion();
+
   return (
     <motion.div
-      initial={{ opacity: 0, y: 12 }}
+      initial={reduceMotion ? false : { opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0 }}
-      className="flex flex-col items-center rounded-modal border border-line bg-panel px-8 py-20 text-center"
+      className="shelf-scene-empty"
     >
-      <h3 className="font-serif text-xl font-semibold text-ink">书架暂时打不开</h3>
-      <p className="mt-2 max-w-[360px] text-sm leading-relaxed text-muted">{message}</p>
+      <div className="shelf-scene-empty-stage" aria-hidden="true">
+        <span className="shelf-scene-fallen shelf-scene-fallen-a" aria-hidden />
+        <span className="shelf-scene-fallen shelf-scene-fallen-b" aria-hidden />
+        <div className="shelf-scene-plank shelf-scene-empty-plank" aria-hidden />
+      </div>
+      <h3 className="mt-8 font-serif text-xl font-semibold text-ink">书架暂时打不开</h3>
+      <p className="shelf-scene-empty-copy mt-2 text-sm leading-relaxed text-muted">{message}</p>
       <Button onClick={onRetry} variant="outline" className="mt-6">
         <RefreshCw className="size-4" aria-hidden />
         重新加载
@@ -303,22 +349,24 @@ function ErrorState({ message, onRetry }: { message: string; onRetry: () => void
   );
 }
 
+/** Loading placeholder: heading bars plus grey stand-in volumes on a plank. */
 function ShelfSkeleton() {
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-      <div className="mb-9 space-y-3">
-        <div className="h-3 w-16 animate-pulse rounded-control bg-line-soft" />
-        <div className="h-9 w-56 animate-pulse rounded-control bg-line-soft" />
-        <div className="h-4 w-72 animate-pulse rounded-control bg-line-soft" />
+      <div className="mb-9">
+        <div className="shelf-scene-skel-bar shelf-scene-skel-bar-eyebrow" />
+        <div className="shelf-scene-skel-bar shelf-scene-skel-bar-title" />
+        <div className="shelf-scene-skel-bar shelf-scene-skel-bar-copy" />
       </div>
-      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
-        {Array.from({ length: 3 }).map((_, index) => (
-          <div
-            key={index}
-            className="h-[180px] animate-pulse rounded-modal border border-line bg-panel"
-            style={{ animationDelay: `${index * 120}ms` }}
-          />
-        ))}
+      <div className="shelf-scene-layer">
+        <div className="mb-4">
+          <div className="shelf-scene-skel-bar shelf-scene-skel-bar-plaque" />
+        </div>
+        <div className="shelf-scene-row">
+          {Array.from({ length: 5 }).map((_, index) => (
+            <div key={index} className="shelf-scene-ghost" />
+          ))}
+        </div>
       </div>
     </motion.div>
   );

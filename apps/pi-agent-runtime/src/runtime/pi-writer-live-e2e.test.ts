@@ -219,6 +219,7 @@ describeLive(`Pi writer Postgres + ${externalBaseURL ? "external-provider" : "lo
     const savedEvent = events.rows.find((row) => row.event_type === "writer.draft.saved");
     expect(savedEvent?.payload_jsonb?.source_metadata).toEqual({
       asset_ids: [ids.asset], graph_node_ids: [ids.graphNode], worldline_path_ids: [ids.worldlinePath],
+      worldline_session_ids: [],
       reference_counts: { assets: 1, graph_nodes: 1, worldline_paths: 1 }
     });
     expect(events.rows.filter((row) => row.event_type === "writer.token").length).toBeGreaterThan(0);

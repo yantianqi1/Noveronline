@@ -64,6 +64,7 @@ export function validateWriterWorkflowPayload(payload: unknown): WriterRunInput 
     selected_asset_ids: stringArray(value.selected_asset_ids ?? rawOptions.selected_asset_ids ?? rawOptions.asset_ids),
     graph_node_ids: stringArray(value.graph_node_ids ?? rawOptions.graph_node_ids),
     worldline_path_ids: stringArray(value.worldline_path_ids ?? rawOptions.worldline_path_ids),
+    worldline_session_ids: stringArray(value.worldline_session_ids ?? rawOptions.worldline_session_ids),
     options: {
       module_key: moduleKey,
       thinking_level: value.options.thinking_level,

@@ -875,9 +875,12 @@ func (s *recordingStoryGraphCandidateAdoptionStore) AdoptCandidate(ctx context.C
 }
 
 type recordingWorldlineSavedPathReader struct {
-	input worldline.ListSavedPathsInput
-	paths []worldline.SavedPathRecord
-	err   error
+	input     worldline.ListSavedPathsInput
+	getInput  worldline.GetSavedPathInput
+	paths     []worldline.SavedPathRecord
+	path      worldline.SavedPathRecord
+	err       error
+	getCalled bool
 }
 
 func (r *recordingWorldlineSavedPathReader) ListSavedPaths(ctx context.Context, input worldline.ListSavedPathsInput) ([]worldline.SavedPathRecord, error) {
@@ -886,6 +889,18 @@ func (r *recordingWorldlineSavedPathReader) ListSavedPaths(ctx context.Context, 
 		return nil, r.err
 	}
 	return r.paths, nil
+}
+
+func (r *recordingWorldlineSavedPathReader) GetSavedPath(ctx context.Context, input worldline.GetSavedPathInput) (worldline.SavedPathRecord, error) {
+	r.getInput = input
+	r.getCalled = true
+	if r.err != nil {
+		return worldline.SavedPathRecord{}, r.err
+	}
+	if r.path.PathID == "" {
+		return worldline.SavedPathRecord{}, &worldline.AppError{Code: "NOT_FOUND", Message: "worldline saved path not found"}
+	}
+	return r.path, nil
 }
 
 type recordingWorldlineSavedPathStore struct {
@@ -6015,6 +6030,147 @@ func TestStartWriterRunCarriesTenantProjectAndRunContext(t *testing.T) {
 	}
 	if body["run_id"] != "run_123" || body["trace_id"] != "trace_123" || body["status"] != "queued" || body["project_id"] != "project-123" {
 		t.Fatalf("unexpected response body: %#v", body)
+	}
+}
+
+func TestStartWriterRunRejectsInvalidWorldlineIDsBeforeSideEffects(t *testing.T) {
+	starter := &recordingStarter{}
+	resolver := &recordingLLMResolver{result: writerComposerResolution()}
+	savedPathReader := &recordingWorldlineSavedPathReader{}
+	server := newDevelopmentServer(Config{
+		Authorizer:               &recordingAuthorizer{},
+		WriterStarter:            starter,
+		LLMResolver:              resolver,
+		WorldlineSavedPathReader: savedPathReader,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", bytes.NewBufferString(`{
+		"mode":"draft",
+		"instruction":"写",
+		"worldline_path_ids":["not-a-uuid"]
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", response.Code, response.Body.String())
+	}
+	if resolver.called || starter.input.ProjectID != "" || savedPathReader.getCalled {
+		t.Fatalf("invalid worldline ids must fail before side effects: resolver=%v starter=%#v pathReader=%v", resolver.called, starter.input, savedPathReader.getCalled)
+	}
+	var body errorEnvelope
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error.Code != "VALIDATION_FAILED" || body.Error.Message != "worldline_path_ids must contain valid UUIDs" {
+		t.Fatalf("unexpected validation response: %#v", body)
+	}
+}
+
+func TestStartWriterRunRejectsMissingWorldlinePathBeforeSideEffects(t *testing.T) {
+	starter := &recordingStarter{}
+	resolver := &recordingLLMResolver{result: writerComposerResolution()}
+	savedPathReader := &recordingWorldlineSavedPathReader{}
+	server := newDevelopmentServer(Config{
+		Authorizer:               &recordingAuthorizer{},
+		WriterStarter:            starter,
+		LLMResolver:              resolver,
+		WorldlineSavedPathReader: savedPathReader,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", bytes.NewBufferString(`{
+		"mode":"draft",
+		"instruction":"写",
+		"worldline_path_ids":["11111111-1111-4111-8111-111111111111"]
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", response.Code, response.Body.String())
+	}
+	if resolver.called || starter.input.ProjectID != "" || !savedPathReader.getCalled {
+		t.Fatalf("missing worldline path must fail before side effects: resolver=%v starter=%#v pathReader=%v", resolver.called, starter.input, savedPathReader.getCalled)
+	}
+	if savedPathReader.getInput.TenantID != "tenant-123" || savedPathReader.getInput.ProjectID != "project-123" {
+		t.Fatalf("path lookup lost admission scope: %#v", savedPathReader.getInput)
+	}
+}
+
+func TestStartWriterRunRejectsWorldlineSessionFromAnotherProjectBeforeSideEffects(t *testing.T) {
+	starter := &recordingStarter{}
+	resolver := &recordingLLMResolver{result: writerComposerResolution()}
+	sessionReader := &recordingWorldlineSessionReader{
+		session: worldline.SessionRecord{SessionID: "session-1", ProjectID: "project-other"},
+	}
+	server := newDevelopmentServer(Config{
+		Authorizer:             &recordingAuthorizer{},
+		WriterStarter:          starter,
+		LLMResolver:            resolver,
+		WorldlineSessionReader: sessionReader,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", bytes.NewBufferString(`{
+		"mode":"draft",
+		"instruction":"写",
+		"worldline_session_ids":["11111111-1111-4111-8111-111111111111"]
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", response.Code, response.Body.String())
+	}
+	if resolver.called || starter.input.ProjectID != "" {
+		t.Fatalf("cross-project worldline session must fail before side effects: resolver=%v starter=%#v", resolver.called, starter.input)
+	}
+}
+
+func TestStartWriterRunCanonicalizesAndDeduplicatesWorldlineIDs(t *testing.T) {
+	pathID := "11111111-1111-4111-8111-111111111111"
+	sessionID := "22222222-2222-4222-8222-222222222222"
+	starter := &recordingStarter{}
+	savedPathReader := &recordingWorldlineSavedPathReader{
+		path: worldline.SavedPathRecord{PathID: pathID, SessionID: sessionID, ProjectID: "project-123"},
+	}
+	sessionReader := &recordingWorldlineSessionReader{
+		session: worldline.SessionRecord{SessionID: sessionID, ProjectID: "project-123"},
+	}
+	server := newDevelopmentServer(Config{
+		Authorizer:               &recordingAuthorizer{},
+		WriterStarter:            starter,
+		LLMResolver:              boundWriterComposerResolver(),
+		WorldlineSavedPathReader: savedPathReader,
+		WorldlineSessionReader:   sessionReader,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/projects/project-123/writer-runs", bytes.NewBufferString(`{
+		"mode":"draft",
+		"instruction":"写",
+		"worldline_path_ids":["11111111-1111-4111-8111-111111111111", " 11111111-1111-4111-8111-111111111111 "],
+		"worldline_session_ids":["22222222-2222-4222-8222-222222222222", "22222222-2222-4222-8222-222222222222"]
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", response.Code, response.Body.String())
+	}
+	if !reflect.DeepEqual(starter.input.Options["worldline_path_ids"], []string{pathID}) ||
+		!reflect.DeepEqual(starter.input.Options["worldline_session_ids"], []string{sessionID}) {
+		t.Fatalf("expected canonical de-duplicated worldline options, got %#v", starter.input.Options)
 	}
 }
 

@@ -409,7 +409,16 @@ export function startWriterRun(
   projectId: string,
   tenantId: string,
   csrfToken: string,
-  input: { mode: string; instruction: string; chapter_id?: string; scene_id?: string },
+  input: {
+    mode: string;
+    instruction: string;
+    chapter_id?: string;
+    scene_id?: string;
+    /** Worldline sessions whose adopted canon events form the plot timeline (doc 25). */
+    worldline_session_ids?: string[];
+    /** Saved worldline paths to deep-read during the run. */
+    worldline_path_ids?: string[];
+  },
 ): Promise<WriterRun> {
   return sendJson<WriterRun>("POST", `/api/projects/${projectId}/writer-runs`, tenantId, csrfToken, input);
 }

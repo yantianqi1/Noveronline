@@ -11,6 +11,7 @@ print(json.dumps({
         "workflow_type": "writer_run",
         "mode": "outline",
         "instruction": "Outline the next chapter.",
+        "worldline_session_ids": [],
         "options": {
             "module_key": "writer_orchestrator",
             "thinking_level": "medium",
@@ -33,6 +34,7 @@ print(json.dumps({
         "selected_asset_ids": [],
         "graph_node_ids": [],
         "worldline_path_ids": [],
+        "worldline_session_ids": [],
         "tool_name": "query_character_profile",
     },
     "writer_public_event": {

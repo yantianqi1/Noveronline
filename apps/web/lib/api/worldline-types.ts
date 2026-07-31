@@ -26,6 +26,8 @@ export type WorldlineSession = {
    * banner/cards must never read step from it.
    */
   current_step: number;
+  /** Number of adopted (canon) events available to a writer attachment. */
+  canon_event_count: number;
   created_by: string;
   created_at: string;
   updated_at: string;
