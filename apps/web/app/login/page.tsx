@@ -1,5 +1,6 @@
 import { Feather } from "lucide-react";
 import type { Metadata } from "next";
+import { Suspense } from "react";
 
 import { CoverMasthead } from "./cover-masthead";
 import { LoginForm } from "./login-form";
@@ -87,7 +88,9 @@ export default function LoginPage() {
               </p>
             </header>
 
-            <LoginForm />
+            <Suspense fallback={<div className="min-h-[248px]" aria-hidden />}>
+              <LoginForm />
+            </Suspense>
 
             <div className="mt-7 flex items-center gap-3 text-caption text-muted">
               <span className="h-px flex-1 bg-line-soft" />

@@ -7,9 +7,9 @@ import {
 
 /**
  * BFF proxy → Go control plane `POST /v1/auth/signup`.
- * Self-serve registration: creates the user, personal workspace, and first
- * project in one transaction, and establishes the session cookie (relayed back
- * through the shared proxy). The trusted-client proof is signed server-side.
+ * The control plane keeps this route explicitly disabled in the current
+ * invite/admin-provisioned release; retaining the proxy keeps the response
+ * contract uniform if self-service signup is enabled in a later release.
  */
 export async function POST(request: Request) {
   let body: unknown;

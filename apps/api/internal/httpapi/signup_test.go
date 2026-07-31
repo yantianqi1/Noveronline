@@ -14,6 +14,19 @@ import (
 	"mirofish-novel/apps/api/internal/registration"
 )
 
+func TestSignupIsDisabledByDefault(t *testing.T) {
+	service := &recordingRegistrationService{result: signupRegistrationResult()}
+	server := NewServer(Config{RegistrationService: service, SessionAuthSecret: "signup-test-secret"})
+	response := httptest.NewRecorder()
+
+	server.ServeHTTP(response, validSignupRequest())
+
+	if response.Code != http.StatusGone || service.called || len(response.Result().Cookies()) != 0 {
+		t.Fatalf("disabled signup status=%d called=%v cookies=%#v body=%s", response.Code, service.called, response.Result().Cookies(), response.Body.String())
+	}
+	assertSignupErrorCode(t, response, "SIGNUP_DISABLED")
+}
+
 func TestSignupCreatesPersonalWorkspaceProjectAndAtomicSession(t *testing.T) {
 	service := &recordingRegistrationService{result: signupRegistrationResult()}
 	legacySessionStore := &recordingAuthSessionStore{createErr: &auth.AppError{Code: auth.CodeLookupFailed, Message: "must not be called"}}
@@ -21,6 +34,7 @@ func TestSignupCreatesPersonalWorkspaceProjectAndAtomicSession(t *testing.T) {
 		RegistrationService:       service,
 		AuthSessionStore:          legacySessionStore,
 		SessionAuthSecret:         "signup-test-secret",
+		AllowSelfSignup:           true,
 		ForceSecureSessionCookies: true,
 	})
 	request := httptest.NewRequest(http.MethodPost, "/v1/auth/signup", strings.NewReader(`{
@@ -74,7 +88,7 @@ func TestSignupRejectsDuplicateEmail(t *testing.T) {
 	service := &recordingRegistrationService{err: &registration.AppError{
 		Code: registration.CodeEmailConflict, Message: "private duplicate detail", Field: "email",
 	}}
-	server := NewServer(Config{RegistrationService: service, SessionAuthSecret: "signup-test-secret"})
+	server := NewServer(Config{RegistrationService: service, SessionAuthSecret: "signup-test-secret", AllowSelfSignup: true})
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, validSignupRequest())
 
@@ -97,7 +111,7 @@ func TestSignupRejectsUnknownFieldsAndTrailingJSONBeforeSideEffects(t *testing.T
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			service := &recordingRegistrationService{result: signupRegistrationResult()}
-			server := NewServer(Config{RegistrationService: service, SessionAuthSecret: "signup-test-secret"})
+			server := NewServer(Config{RegistrationService: service, SessionAuthSecret: "signup-test-secret", AllowSelfSignup: true})
 			response := httptest.NewRecorder()
 			server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/auth/signup", strings.NewReader(testCase.body)))
 
@@ -115,6 +129,7 @@ func TestSignupRateLimitUsesTrustedClientAndNormalizedEmail(t *testing.T) {
 	server := NewServer(Config{
 		RegistrationService:        service,
 		SessionAuthSecret:          "signup-test-secret",
+		AllowSelfSignup:            true,
 		RateLimiter:                limiter,
 		TrustedClientProofVerifier: recordingTrustedClientProofVerifier{result: "trusted-client-hash"},
 	})
@@ -138,7 +153,7 @@ func TestSignupInitialSessionPersistenceFailureReturnsNoCookie(t *testing.T) {
 			Code: registration.CodeRegistrationFailed, Message: "private session insert failure",
 		},
 	}
-	server := NewServer(Config{RegistrationService: service, SessionAuthSecret: "signup-test-secret"})
+	server := NewServer(Config{RegistrationService: service, SessionAuthSecret: "signup-test-secret", AllowSelfSignup: true})
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, validSignupRequest())
 

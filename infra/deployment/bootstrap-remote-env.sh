@@ -2,12 +2,19 @@
 set -eu
 
 : "${PUBLIC_HOST:?PUBLIC_HOST is required}"
+: "${SMTP_HOST:?SMTP_HOST is required; configure a real delivery host before bootstrapping}"
+: "${SMTP_PORT:?SMTP_PORT is required; configure a real delivery port before bootstrapping}"
+: "${SMTP_USERNAME:?SMTP_USERNAME is required; configure a real delivery account before bootstrapping}"
+: "${SMTP_PASSWORD:?SMTP_PASSWORD is required; configure a real delivery secret before bootstrapping}"
+: "${SMTP_FROM:?SMTP_FROM is required; configure a real sender before bootstrapping}"
+: "${SMTP_TLS_MODE:?SMTP_TLS_MODE is required; configure implicit_tls or starttls before bootstrapping}"
 
 output_path="${1:-.env}"
 image_tag="${MIROFISH_IMAGE_TAG:-latest}"
 web_port="${WEB_PORT:-3999}"
 
 postgres_password="$(openssl rand -hex 24)"
+redis_password="$(openssl rand -hex 24)"
 runtime_password="$(openssl rand -hex 24)"
 storage_password="$(openssl rand -hex 24)"
 auth_session_secret="$(openssl rand -hex 32)"
@@ -24,6 +31,7 @@ umask 077
     'POSTGRES_DB=mirofish' \
     'POSTGRES_USER=mirofish_admin' \
     "POSTGRES_PASSWORD=$postgres_password" \
+    "REDIS_PASSWORD=$redis_password" \
     'APP_DATABASE_USER=mirofish_runtime' \
     "APP_DATABASE_PASSWORD=$runtime_password" \
     "DATABASE_URL=postgresql://mirofish_runtime:$runtime_password@postgres:5432/mirofish?sslmode=disable" \
@@ -41,15 +49,15 @@ umask 077
     'MIROFISH_OBJECT_STORAGE_USE_SSL=false' \
     'MIROFISH_OBJECT_STORAGE_REGION=us-east-1' \
     'TEMPORAL_NAMESPACE=mirofish-production' \
-    'MIROFISH_AUTH_RATE_LIMIT_REDIS_URL=redis://redis:6379/0' \
+    "MIROFISH_AUTH_RATE_LIMIT_REDIS_URL=redis://:$redis_password@redis:6379/0" \
     "MIROFISH_RATE_LIMIT_KEY_SECRET=$rate_limit_secret" \
     'MIROFISH_RATE_LIMIT_POLICIES_JSON='"'"'{"auth_login":{"limit":10,"window_seconds":60},"auth_signup":{"limit":5,"window_seconds":300},"auth_session_mutation":{"limit":20,"window_seconds":60},"collaboration_invite_create":{"limit":10,"window_seconds":60},"collaboration_invite_accept":{"limit":20,"window_seconds":60},"llm_admin_mutation":{"limit":20,"window_seconds":60},"llm_provider_health":{"limit":30,"window_seconds":60}}'"'"'' \
-    'SMTP_HOST=127.0.0.1' \
-    'SMTP_PORT=465' \
-    'SMTP_USERNAME=unconfigured' \
-    "SMTP_PASSWORD=$(openssl rand -hex 24)" \
-    'SMTP_FROM=no-reply@localhost.invalid' \
-    'SMTP_TLS_MODE=implicit_tls' \
+    "SMTP_HOST=$SMTP_HOST" \
+    "SMTP_PORT=$SMTP_PORT" \
+    "SMTP_USERNAME=$SMTP_USERNAME" \
+    "SMTP_PASSWORD=$SMTP_PASSWORD" \
+    "SMTP_FROM=$SMTP_FROM" \
+    "SMTP_TLS_MODE=$SMTP_TLS_MODE" \
     "AUTH_RECOVERY_RESET_BASE_URL=https://$PUBLIC_HOST:$web_port/recovery/reset" \
     "COLLABORATION_ACCEPT_BASE_URL=https://$PUBLIC_HOST:$web_port/invitations/accept" \
     'API_PORT=3888' \

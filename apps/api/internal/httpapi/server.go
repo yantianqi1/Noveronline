@@ -40,6 +40,7 @@ import (
 type Config struct {
 	SessionAuthSecret                string
 	AllowDevelopmentAuth             bool
+	AllowSelfSignup                  bool
 	ForceSecureSessionCookies        bool
 	AuthReader                       auth.Reader
 	PasswordAuthenticator            auth.PasswordAuthenticator
@@ -184,6 +185,7 @@ type ReadinessChecker interface {
 type Server struct {
 	sessionAuthSecret                string
 	allowDevelopmentAuth             bool
+	allowSelfSignup                  bool
 	forceSecureSessionCookies        bool
 	authReader                       auth.Reader
 	passwordAuthenticator            auth.PasswordAuthenticator
@@ -1155,6 +1157,7 @@ func NewServer(config Config) *Server {
 	return &Server{
 		sessionAuthSecret:                strings.TrimSpace(config.SessionAuthSecret),
 		allowDevelopmentAuth:             config.AllowDevelopmentAuth,
+		allowSelfSignup:                  config.AllowSelfSignup,
 		forceSecureSessionCookies:        config.ForceSecureSessionCookies,
 		authReader:                       authReader,
 		passwordAuthenticator:            config.PasswordAuthenticator,
@@ -2791,6 +2794,10 @@ func (s *Server) handlePasswordLogin(response http.ResponseWriter, request *http
 }
 
 func (s *Server) handleSignup(response http.ResponseWriter, request *http.Request) {
+	if !s.allowSelfSignup {
+		writeError(response, request, http.StatusGone, "SIGNUP_DISABLED", "self-service signup is disabled for this release", nil)
+		return
+	}
 	if s.registrationService == nil || strings.TrimSpace(s.sessionAuthSecret) == "" {
 		writeError(response, request, http.StatusServiceUnavailable, registration.CodeBackendUnconfigured, "registration backend is not configured", nil)
 		return

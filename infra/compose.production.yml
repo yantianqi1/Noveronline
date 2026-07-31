@@ -19,6 +19,8 @@ services:
     ports: !reset []
   redis:
     command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     ports: !reset []
   temporal:
     environment:
@@ -45,6 +47,7 @@ services:
     environment:
       MIROFISH_DEPLOYMENT_ENV: ${MIROFISH_DEPLOYMENT_ENV:?MIROFISH_DEPLOYMENT_ENV is required}
       MIROFISH_ENABLE_DEVELOPMENT_AUTH: "0"
+      MIROFISH_ENABLE_SELF_SIGNUP: "0"
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       MIROFISH_AUTH_SESSION_SECRET: ${MIROFISH_AUTH_SESSION_SECRET:?MIROFISH_AUTH_SESSION_SECRET is required}
       MIROFISH_RECOVERY_CLIENT_PROOF_SECRET: ${MIROFISH_RECOVERY_CLIENT_PROOF_SECRET:?MIROFISH_RECOVERY_CLIENT_PROOF_SECRET is required}

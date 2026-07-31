@@ -1258,6 +1258,7 @@ func withSessionAuthSecret(config httpapi.Config) httpapi.Config {
 		os.Getenv("MIROFISH_DEPLOYMENT_ENV"),
 		os.Getenv("MIROFISH_ENABLE_DEVELOPMENT_AUTH"),
 	)
+	config.AllowSelfSignup = parseBoolEnv(os.Getenv("MIROFISH_ENABLE_SELF_SIGNUP"))
 	return config
 }
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { motion, AnimatePresence } from "motion/react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { AlertCircle, Eye, EyeOff, LogIn } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { z } from "zod";
@@ -35,6 +35,7 @@ function messageForApiError(code: string | undefined): string {
 
 export function LoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -81,7 +82,9 @@ export function LoginForm() {
       }
 
       // Session cookie is set by the BFF proxy; move into the workspace.
-      router.push("/");
+      const returnTo = searchParams.get("returnTo") ?? "";
+      const safeReturnTo = returnTo.startsWith("/") && !returnTo.startsWith("//") ? returnTo : "/";
+      router.push(safeReturnTo);
       router.refresh();
     } catch {
       setFormError("网络异常，请检查连接后重试。");
