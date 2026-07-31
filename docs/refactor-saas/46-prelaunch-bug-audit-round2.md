@@ -32,7 +32,7 @@
 
 当前验证：Go `go test ./...` 通过；Python `510 passed, 31 skipped`；Pi `138 passed, 4 skipped` + typecheck/build；Web `123 passed, 1 skipped` + typecheck/build；infra `72 passed`；`git diff --check` 通过。
 
-仍未闭合的边界：M-S3 注册邮箱验证需要产品确认邮件验证流程与 schema；M-Y1 中 assets/writer-review/worldline-prepare 等同族 workflow 的 retry/idempotency 还需逐个收敛；Worldline sessions/saved-paths/goal-starts/prepared-agents 与 Go collections 的显式分页仍待补；登录 recovery UI、移动 drawer focus trap 等 Minor 尚未处理。因而本报告不能标记为全部 `fixed_verified`，但原报告列出的 3 个 BLOCKER 已关闭。
+仍未闭合的边界：M-S3 注册邮箱验证需要产品确认邮件验证流程与 schema；M-Y1 中 assets/writer-review/worldline-prepare 等同族 workflow 的 retry/idempotency 还需逐个收敛；Worldline sessions/saved-paths/goal-starts/prepared-agents 与 Go collections 的显式分页仍待补；移动 drawer focus trap 等 Minor 尚未处理。Recovery request/reset UI、邀请接受 UI 与默认关闭 signup 契约已在当前 worktree 补齐。因而本报告不能标记为全部 `fixed_verified`，但原报告列出的 3 个 BLOCKER 已关闭。
 
 ---
 
