@@ -13,7 +13,7 @@ from mirofish_agents.llm_quota import (
     ProviderUsage,
     stable_provider_call_id,
 )
-from mirofish_agents.seed.sequential_reader import LLMFacilityError, ModuleBindingResolution
+from mirofish_agents.seed.sequential_reader import LLMFacilityError, ModuleBindingResolution, _estimate_tokens
 from mirofish_agents.llm_quota.postgres import _json_payload
 
 
@@ -121,10 +121,29 @@ def test_gate_admits_before_provider_and_finalizes_actual_usage() -> None:
     assert candidates == [{"title": "Rain Treaty"}]
     assert order == ["provider"]
     assert len(store.admissions) == 1
-    assert store.admissions[0].input_token_upper_bound == len("full source material".encode("utf-8"))
+    assert store.admissions[0].input_token_upper_bound == _estimate_tokens("full source material")
     assert store.admissions[0].output_token_upper_bound == 512
     assert store.finalized[0][2] == ProviderUsage(prompt_tokens=11, completion_tokens=7)
     assert store.failed == []
+
+
+def test_gate_uses_character_token_estimate_instead_of_utf8_bytes() -> None:
+    store = RecordingQuotaStore()
+    gate = ProviderQuotaGate(store)
+
+    gate.execute_json(
+        context=_context(),
+        resolution=_resolution(),
+        stage="candidate_generation",
+        call_index=0,
+        input_texts=["中文输入"],
+        provider=lambda _: _provider_response(),
+        validate=lambda response: response["candidates"],
+    )
+
+    bound = store.admissions[0].input_token_upper_bound
+    assert bound == _estimate_tokens("中文输入")
+    assert bound < len("中文输入".encode("utf-8"))
 
 
 @pytest.mark.parametrize(

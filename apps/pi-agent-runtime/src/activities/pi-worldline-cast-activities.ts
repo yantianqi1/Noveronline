@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import type { AgentEvent, ToolExecutionMode } from "@earendil-works/pi-agent-core";
 import { Connection, Client } from "@temporalio/client";
@@ -333,6 +333,9 @@ export function createPiWorldlineGoalStartActivity(deps: PiWorldlineCastDeps = {
     } catch (error) {
       const code = errorCode(error);
       const message = error instanceof Error ? error.message : "worldline goal-start failed";
+      if (isRetryablePiError(code, message)) {
+        throw ApplicationFailure.retryable(publicErrorMessage(code, message), code);
+      }
       await deps.updateGoalStartStatus?.({
         tenant_id: input.tenant_id,
         project_id: input.project_id,
@@ -381,7 +384,7 @@ async function runCast(deps: PiWorldlineCastDeps, input: WorldlineGoalStartInput
     channel_id: resolution.channel_id,
     credential_ref: resolution.credential_ref
   });
-  const providerCallId = `worldline-cast:${input.run_id}:${randomUUID()}`;
+  const providerCallId = worldlineCastProviderCallId(input);
   const lease = await deps.acquireLLMLease?.({
     tenant_id: input.tenant_id,
     project_id: input.project_id,
@@ -460,6 +463,13 @@ async function runCast(deps: PiWorldlineCastDeps, input: WorldlineGoalStartInput
   return committed;
 }
 
+function worldlineCastProviderCallId(input: WorldlineGoalStartInput): string {
+  const digest = createHash("sha256")
+    .update([input.tenant_id, input.project_id, input.run_id, WORLDLINE_CAST_MODULE_KEY].join("\0"))
+    .digest("hex");
+  return `pi-worldline-cast:v1:${digest}`;
+}
+
 function normalizeCommitArgs(args?: Record<string, unknown>): WorldlineCastCommit {
   const agentRefs = normalizeRefs(args?.agent_refs, ["asset", "entity"]);
   const sourceRefs = normalizeRefs(args?.source_refs, ["asset", "entity", "saved_path", "worldline_event"]);
@@ -525,6 +535,11 @@ function publicErrorMessage(code: string, message: string): string {
   }
   if (message.length > 240) return message.slice(0, 240);
   return message;
+}
+
+function isRetryablePiError(code: string, message: string): boolean {
+  if (code === "LLM_QUOTA_BACKEND_FAILED" || code === "LLM_QUOTA_FINALIZE_FAILED") return true;
+  return /timeout|timed out|econnreset|eai_again|temporar|\b5\d\d\b|\b429\b/i.test(message);
 }
 
 export async function startWorldlinePreparationWorkflow(request: {

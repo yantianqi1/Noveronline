@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import inspect
 import json
 import os
 import re
@@ -16,6 +17,7 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
 from mirofish_agents.common.context import AgentContext
+from mirofish_agents.common.http import read_response_limited, response_limit_from_env
 from mirofish_agents.seed.pdf_ocr import (
     PdfOcrBackend,
     PdfOcrBackendUnconfiguredError,
@@ -6721,7 +6723,10 @@ def _aws_v4_signing_key(secret_key: str, date_stamp: str, region: str) -> bytes:
 
 def _urlopen_bytes(request: Request) -> bytes:
     with urlopen(request, timeout=30) as response:
-        return response.read()
+        return read_response_limited(
+            response,
+            max_bytes=response_limit_from_env("MIROFISH_SOURCE_MAX_RESPONSE_BYTES", 64 * 1024 * 1024),
+        )
 
 
 def _record_pending_stage_event(
@@ -8732,32 +8737,19 @@ def sequential_reading_activity(
             workflow_event_writer=workflow_event_writer,
         )
 
+    read_segments_kwargs: dict[str, Any] = {
+        "context": context,
+        "module_key": "sequential_reading",
+        "segments": sanitized_segments,
+    }
     try:
-        reading_result = reader.read_segments(
-            context=context,
-            module_key="sequential_reading",
-            segments=sanitized_segments,
-            progress_callback=_on_sequential_progress,
-        )
-    except TypeError:
-        # Older test doubles may not accept progress_callback.
-        try:
-            reading_result = reader.read_segments(
-                context=context,
-                module_key="sequential_reading",
-                segments=sanitized_segments,
-            )
-        except Exception as exc:
-            return _sequential_reading_failed_result(
-                base=base,
-                context=context,
-                segment_count=segment_count,
-                code="LLM_PROVIDER_ERROR",
-                message=str(exc),
-                public_message="sequential reading provider failed",
-                workflow_event_writer=workflow_event_writer,
-                workflow_status_writer=workflow_status_writer,
-            )
+        signature = inspect.signature(reader.read_segments)
+    except (TypeError, ValueError):
+        signature = None
+    if signature is not None and "progress_callback" in signature.parameters:
+        read_segments_kwargs["progress_callback"] = _on_sequential_progress
+    try:
+        reading_result = reader.read_segments(**read_segments_kwargs)
     except Exception as exc:
         return _sequential_reading_failed_result(
             base=base,

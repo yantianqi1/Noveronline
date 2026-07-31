@@ -90,7 +90,16 @@ function withAnalysisCancellation(
   return async (payload: unknown) => {
     const context = Context.current();
     context.heartbeat({ stage: "started" });
-    const timer = setInterval(() => context.heartbeat({ stage: "running" }), 2000);
+    const heartbeat = () => {
+      try {
+        void Promise.resolve(context.heartbeat({ stage: "running" })).catch((error: unknown) => {
+          console.warn("Pi analysis heartbeat failed", error);
+        });
+      } catch (error) {
+        console.warn("Pi analysis heartbeat failed", error);
+      }
+    };
+    const timer = setInterval(heartbeat, 2000);
     try {
       const result = await activity(payload);
       if (context.cancellationSignal.aborted) {

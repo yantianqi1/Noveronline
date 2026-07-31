@@ -1,21 +1,44 @@
 services:
   postgres:
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     ports:
       - "127.0.0.1:${POSTGRES_PORT:?POSTGRES_PORT is required}:5432"
   redis:
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"]
     ports:
       - "127.0.0.1:${REDIS_PORT:?REDIS_PORT is required}:6379"
   temporal:
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      DBNAME: ${TEMPORAL_DB:?TEMPORAL_DB is required}
+      VISIBILITY_DBNAME: ${TEMPORAL_VISIBILITY_DB:?TEMPORAL_VISIBILITY_DB is required}
     ports:
       - "127.0.0.1:${TEMPORAL_PORT:?TEMPORAL_PORT is required}:7233"
+  temporal-db-init:
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      TEMPORAL_DB: ${TEMPORAL_DB:?TEMPORAL_DB is required}
+      TEMPORAL_VISIBILITY_DB: ${TEMPORAL_VISIBILITY_DB:?TEMPORAL_VISIBILITY_DB is required}
   temporal-ui:
     ports:
       - "127.0.0.1:${TEMPORAL_UI_PORT:?TEMPORAL_UI_PORT is required}:8080"
   minio:
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
     ports:
       - "127.0.0.1:${MINIO_API_PORT:?MINIO_API_PORT is required}:9000"
       - "127.0.0.1:${MINIO_CONSOLE_PORT:?MINIO_CONSOLE_PORT is required}:9001"
   minio-init:
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
+      MIROFISH_OBJECT_STORAGE_BUCKET: ${MIROFISH_OBJECT_STORAGE_BUCKET:?MIROFISH_OBJECT_STORAGE_BUCKET is required}
     entrypoint:
       - sh
       - -c

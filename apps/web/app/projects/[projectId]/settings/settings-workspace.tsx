@@ -84,6 +84,13 @@ export function SettingsWorkspace({ projectId }: { projectId: string }) {
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savedTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
+  useEffect(() => {
+    return () => {
+      if (noticeTimer.current) clearTimeout(noticeTimer.current);
+      for (const timer of Object.values(savedTimers.current)) clearTimeout(timer);
+    };
+  }, []);
+
   const applying = batchProgress !== null;
   const readyChannels = useMemo(() => enabledChannels(channels), [channels]);
   const groups = useMemo(

@@ -9,6 +9,7 @@ from typing import Any, Callable, Protocol
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 from mirofish_agents.common.context import AgentContext
 from mirofish_agents.seed.sequential_reader import (
@@ -1812,6 +1813,25 @@ def _stable_workflow_persistence_error(
     return default_code, default_message
 
 
+def _is_transient_worldline_error(code: str, message: str) -> bool:
+    normalized_code = code.strip().upper()
+    if normalized_code in {
+        "LLM_PROVIDER_ERROR",
+        "LLM_PROVIDER_TIMEOUT",
+        "LLM_PROVIDER_RATE_LIMITED",
+        "LLM_QUOTA_BACKEND_ERROR",
+        "LLM_QUOTA_RELEASE_FAILED",
+        "WORLDLINE_CANDIDATE_EVENT_WRITE_FAILED",
+        "LLM_TELEMETRY_WRITE_FAILED",
+    }:
+        return True
+    normalized_message = message.strip().lower()
+    return any(
+        marker in normalized_message
+        for marker in ("timeout", "timed out", "429", "502", "503", "504", "connection reset", "temporarily")
+    )
+
+
 def _workflow_event_writer_from_env() -> WorkflowEventWriter | None:
     database_url = os.environ.get("DATABASE_URL", "").strip()
     if not database_url:
@@ -2491,6 +2511,8 @@ def worldline_step_activity(
             options=_sanitize_worldline_value(options),
         )
     except LLMFacilityError as exc:
+        if payload.get("_temporal_retry_transient") and _is_transient_worldline_error(exc.code, exc.message):
+            raise ApplicationError(exc.message, type=exc.code, non_retryable=False) from exc
         return _failed_result(
             base=base,
             context=context,
@@ -2502,6 +2524,12 @@ def worldline_step_activity(
             workflow_status_writer=workflow_status_writer,
         )
     except Exception:
+        if payload.get("_temporal_retry_transient"):
+            raise ApplicationError(
+                "worldline provider call failed",
+                type="LLM_PROVIDER_ERROR",
+                non_retryable=False,
+            )
         return _failed_result(
             base=base,
             context=context,
@@ -2514,13 +2542,17 @@ def worldline_step_activity(
         )
     if isinstance(result, dict) and result.get("status") == "failed":
         error = result.get("error") if isinstance(result.get("error"), dict) else {}
+        error_code = str(error.get("code") or "WORLDLINE_STEP_FAILED")
+        error_message = str(error.get("message") or "worldline step runner failed")
+        if payload.get("_temporal_retry_transient") and _is_transient_worldline_error(error_code, error_message):
+            raise ApplicationError(error_message, type=error_code, non_retryable=False)
         return _failed_result(
             base=base,
             context=context,
             session_id=session_id,
             mode=mode,
-            code=str(error.get("code") or "WORLDLINE_STEP_FAILED"),
-            message=str(error.get("message") or "worldline step runner failed"),
+            code=error_code,
+            message=error_message,
             workflow_event_writer=workflow_event_writer,
             workflow_status_writer=workflow_status_writer,
         )
@@ -2573,17 +2605,53 @@ def worldline_step_activity(
     }
 
 
+@activity.defn
+def worldline_step_failure_activity(
+    payload: dict[str, Any],
+    code: str,
+    message: str,
+) -> dict[str, Any]:
+    context = AgentContext.model_validate(payload.get("context", payload))
+    base = _base_payload(context)
+    session_id = _required_text(payload.get("session_id"), "session_id")
+    mode = _normalize_mode(payload.get("mode"))
+    return _failed_result(
+        base=base,
+        context=context,
+        session_id=session_id,
+        mode=mode,
+        code=code,
+        message=message,
+        workflow_event_writer=_workflow_event_writer_from_env(),
+        workflow_status_writer=_workflow_status_writer_from_env(),
+    )
+
+
 @workflow.defn
 class WorldlineStepWorkflow:
     @workflow.run
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await workflow.execute_activity(
-            worldline_step_activity,
-            payload,
-            start_to_close_timeout=timedelta(minutes=20),
-            schedule_to_close_timeout=timedelta(hours=2),
-            retry_policy=WORLDLINE_ACTIVITY_RETRY_POLICY,
-        )
+        retry_payload = {**payload, "_temporal_retry_transient": True}
+        try:
+            return await workflow.execute_activity(
+                worldline_step_activity,
+                retry_payload,
+                start_to_close_timeout=timedelta(minutes=20),
+                schedule_to_close_timeout=timedelta(hours=2),
+                retry_policy=WORLDLINE_ACTIVITY_RETRY_POLICY,
+            )
+        except Exception as exc:
+            cause = getattr(exc, "cause", exc)
+            code = getattr(cause, "type", None) or "WORLDLINE_STEP_FAILED"
+            return await workflow.execute_activity(
+                worldline_step_failure_activity,
+                payload,
+                str(code),
+                "worldline step failed after bounded retries",
+                start_to_close_timeout=timedelta(minutes=2),
+                schedule_to_close_timeout=timedelta(minutes=5),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
 
 
 def run_worldline_step_workflow_locally(
@@ -2611,6 +2679,7 @@ def worker_spec() -> dict[str, list[str] | str]:
         ],
         "activities": [
             worldline_step_activity.__name__,
+            worldline_step_failure_activity.__name__,
             worldline_prepare_activity.__name__,
             "worldline_auto_evolution_step_activity",
             "worldline_auto_evolution_finalize_activity",

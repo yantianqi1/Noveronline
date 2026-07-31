@@ -56,6 +56,7 @@ from mirofish_agents.temporal.worldline import (
     WorldlinePrepareWorkflow,
     WorldlineStepWorkflow,
     worldline_prepare_activity,
+    worldline_step_failure_activity,
     worldline_step_activity,
 )
 from mirofish_agents.temporal.worldline_auto_evolution import (
@@ -93,6 +94,7 @@ def worker_components_for_task_queue(task_queue: str) -> dict[str, list[object]]
             ],
             "activities": [
                 worldline_step_activity,
+                worldline_step_failure_activity,
                 worldline_prepare_activity,
                 worldline_auto_evolution_step_activity,
                 worldline_auto_evolution_finalize_activity,

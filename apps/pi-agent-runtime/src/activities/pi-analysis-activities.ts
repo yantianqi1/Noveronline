@@ -366,6 +366,9 @@ export function createPiAnalysisRunActivity(deps: PiAnalysisDeps = {}) {
     } catch (error) {
       const code = errorCode(error);
       const message = errorMessage(error);
+      if (isRetryablePiError(code, message)) {
+        throw ApplicationFailure.retryable(message, code);
+      }
       await record("analysis.run.failed", { error_code: code, message }, "run:failed");
       await deps.updateAnalysisRunStatus?.({
         tenant_id: input.tenant_id,
@@ -693,7 +696,13 @@ function errorCode(error: unknown): string {
   if (message.includes("provider") || message.includes("LLM_PROVIDER")) return "LLM_PROVIDER_ERROR";
   if (message.includes("permission")) return "TOOL_PERMISSION_DENIED";
   if (message.includes("OBJECT_STORAGE")) return "OBJECT_STORAGE_READ_FAILED";
+  if (message.includes("LLM_QUOTA_")) return message.split(/\s+/)[0] ?? "LLM_QUOTA_BACKEND_FAILED";
   return "ANALYSIS_RUN_FAILED";
+}
+
+function isRetryablePiError(code: string, message: string): boolean {
+  if (code === "LLM_QUOTA_BACKEND_FAILED" || code === "LLM_QUOTA_FINALIZE_FAILED") return true;
+  return /timeout|timed out|econnreset|eai_again|temporar|\b5\d\d\b|\b429\b/i.test(message);
 }
 
 function errorMessage(error: unknown): string {

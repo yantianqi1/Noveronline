@@ -22,6 +22,26 @@ func scanCollection(row interface{ Scan(...any) error }) (Collection, error) {
 	return c, nil
 }
 
+func scanCollectionWithItems(row interface{ Scan(...any) error }) (Collection, error) {
+	var c Collection
+	var metadata, itemsJSON string
+	if err := row.Scan(&c.CollectionID, &c.ProjectID, &c.Title, &c.Summary, &c.Lifecycle, &metadata, &itemsJSON, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return Collection{}, ErrNotFound
+		}
+		return Collection{}, err
+	}
+	c.Metadata = map[string]any{}
+	if err := json.Unmarshal([]byte(metadata), &c.Metadata); err != nil {
+		return Collection{}, err
+	}
+	c.Items = []CollectionItem{}
+	if err := json.Unmarshal([]byte(itemsJSON), &c.Items); err != nil {
+		return Collection{}, err
+	}
+	return c, nil
+}
+
 const collectionSelect = `SELECT collection_id::text,project_id::text,title,summary,lifecycle,metadata_jsonb::text,created_at,updated_at FROM asset_collections WHERE tenant_id=$1 AND project_id=$2`
 
 func loadCollection(ctx context.Context, tx *sql.Tx, scope RequestScope, id string) (Collection, error) {
@@ -53,14 +73,45 @@ func (s *SQLStore) ListCollections(ctx context.Context, scope RequestScope) ([]C
 		return nil, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, collectionSelect+` ORDER BY title,collection_id`, scope.TenantID, scope.ProjectID)
+	rows, err := tx.QueryContext(ctx, `SELECT
+  c.collection_id::text,
+  c.project_id::text,
+  c.title,
+  c.summary,
+  c.lifecycle,
+  c.metadata_jsonb::text,
+  COALESCE(
+    jsonb_agg(jsonb_build_object(
+      'asset_id', a.asset_id::text,
+      'title', a.title,
+      'asset_type', a.asset_type,
+      'position', i.position,
+      'created_at', i.created_at
+    ) ORDER BY i.position, a.asset_id) FILTER (WHERE a.asset_id IS NOT NULL),
+    '[]'::jsonb
+  )::text,
+  c.created_at,
+  c.updated_at
+FROM asset_collections c
+LEFT JOIN asset_collection_items i
+  ON i.tenant_id = c.tenant_id
+ AND i.project_id = c.project_id
+ AND i.collection_id = c.collection_id
+LEFT JOIN assets a
+  ON a.tenant_id = i.tenant_id
+ AND a.project_id = i.project_id
+ AND a.asset_id = i.asset_id
+WHERE c.tenant_id = $1 AND c.project_id = $2
+GROUP BY c.collection_id, c.project_id, c.title, c.summary, c.lifecycle,
+         c.metadata_jsonb, c.created_at, c.updated_at
+ORDER BY c.title, c.collection_id`, scope.TenantID, scope.ProjectID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	collections := []Collection{}
 	for rows.Next() {
-		c, scanErr := scanCollection(rows)
+		c, scanErr := scanCollectionWithItems(rows)
 		if scanErr != nil {
 			return nil, scanErr
 		}
@@ -68,12 +119,6 @@ func (s *SQLStore) ListCollections(ctx context.Context, scope RequestScope) ([]C
 	}
 	if err = rows.Err(); err != nil {
 		return nil, err
-	}
-	for i := range collections {
-		collections[i], err = loadCollection(ctx, tx, scope, collections[i].CollectionID)
-		if err != nil {
-			return nil, err
-		}
 	}
 	if err = tx.Commit(); err != nil {
 		return nil, err

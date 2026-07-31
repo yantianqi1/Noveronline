@@ -379,11 +379,11 @@ describe("createPostgresPiWriterDeps", () => {
     expect(result.timelines[0]?.events[0].state_changes).toEqual({ location: "城门" });
     // Canon-only, ordered by step, scoped to the attached sessions.
     expect(db.queries[0]?.text).toContain("e.status = 'canon'");
-    expect(db.queries[0]?.text).toContain("ORDER BY e.session_id, e.step ASC");
-    expect(db.queries[0]?.values).toEqual(["ten_1", "proj_1", ["sess-1"]]);
+    expect(db.queries[0]?.text).toContain("ORDER BY session_id, step ASC");
+    expect(db.queries[0]?.values).toEqual(["ten_1", "proj_1", ["sess-1"], 200]);
   });
 
-  it("does not globally truncate canon timelines across attached sessions", async () => {
+  it("caps each canon timeline explicitly and reports truncation", async () => {
     const db = new RecordingDb();
     db.enqueue(
       ["sess-1", "sess-2"].flatMap((sessionId) =>
@@ -417,7 +417,8 @@ describe("createPostgresPiWriterDeps", () => {
     expect(result.timelines.map((timeline) => timeline.events)).toHaveLength(2);
     expect(result.timelines[0]?.events).toHaveLength(61);
     expect(result.timelines[1]?.events).toHaveLength(61);
-    expect(db.queries[0]?.text).not.toMatch(/\bLIMIT\s+\$4\b/i);
+    expect(result.timelines[0]?.truncated).toBe(false);
+    expect(db.queries[0]?.text).toContain("event_rank <= $4");
   });
 
   it("returns an empty worldline timeline when no session is attached", async () => {

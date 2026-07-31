@@ -101,6 +101,7 @@ async function sendJson<T>(
   tenantId: string,
   csrfToken: string,
   body?: unknown,
+  options: { keepalive?: boolean } = {},
 ): Promise<T> {
   const response = await fetch(path, {
     method,
@@ -112,6 +113,7 @@ async function sendJson<T>(
       "X-Request-Id": requestId(),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
+    keepalive: options.keepalive,
   });
   if (!response.ok) throw await readError(response);
   return (await response.json()) as T;
@@ -346,6 +348,7 @@ export function updateBlockText(
   blockId: string,
   expectedVersion: number,
   contentText: string,
+  options: { keepalive?: boolean } = {},
 ): Promise<ManuscriptBlock> {
   return sendJson<ManuscriptBlock>(
     "PATCH",
@@ -353,6 +356,7 @@ export function updateBlockText(
     tenantId,
     csrfToken,
     { expected_version: expectedVersion, content_text: contentText },
+    options,
   );
 }
 

@@ -257,6 +257,24 @@ export function adoptCharacterProposal(
     tenantId,
     csrfToken,
     { note: note ?? "" },
+	);
+}
+
+/** Persist a proposal rejection so it does not return after a reload. */
+export function rejectCharacterProposal(
+  projectId: string,
+  tenantId: string,
+  csrfToken: string,
+  interactionId: string,
+  assetId: string,
+  note?: string,
+): Promise<CharacterProposal> {
+  return sendJson<CharacterProposal>(
+    "POST",
+    `/api/projects/${projectId}/character-interactions/${encodeURIComponent(interactionId)}/proposals/${encodeURIComponent(assetId)}/rejections`,
+    tenantId,
+    csrfToken,
+    { note: note ?? "" },
   );
 }
 

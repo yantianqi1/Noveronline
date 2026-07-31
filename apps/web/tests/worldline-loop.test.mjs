@@ -45,6 +45,14 @@ test("BFF 放行变量 GET 与嵌套 PATCH，且变量 id 被重新编码", asyn
   assert.match(route, /`\/v1\/worldline-sessions\/\$\{encodeURIComponent\(m\[1\]\)\}\$\{suffix\}\$\{query\}`/);
 });
 
+test("项目 BFF 兜底路径按段编码并拒绝查询片段注入", async () => {
+  const route = await source("app/api/projects/[projectId]/[...path]/route.ts");
+  assert.match(route, /function hasUnsafePathCharacters\(value: string\)/);
+  assert.match(route, /function encodePathSegments\(value: string\)/);
+  assert.match(route, /encodePathSegments\(rest\)/);
+  assert.match(route, /hasUnsafePathCharacters\(projectId\) \|\| hasUnsafePathCharacters\(rest\)/);
+});
+
 test("banner 步号用领域步 current_step，不再读编排 sequence", async () => {
   const workspace = await source("app/projects/[projectId]/worldline/worldline-workspace.tsx");
   // The banner reads the session's domain step…

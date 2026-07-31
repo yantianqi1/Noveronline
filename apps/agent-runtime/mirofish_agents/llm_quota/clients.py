@@ -7,6 +7,7 @@ from typing import Any, Callable
 from urllib.request import Request, urlopen
 
 from mirofish_agents.common.context import AgentContext
+from mirofish_agents.common.http import read_response_limited, response_limit_from_env
 from mirofish_agents.seed.sequential_reader import LLMFacilityError, ModuleBindingResolution, _parse_chat_json_content
 
 from .gate import ProviderQuotaGate
@@ -174,4 +175,7 @@ def _urlopen_bytes(request: Request) -> bytes:
     if timeout_seconds <= 0:
         raise LLMFacilityError("LLM_HTTP_TIMEOUT_INVALID", "LLM HTTP timeout configuration is invalid")
     with urlopen(request, timeout=timeout_seconds) as response:
-        return response.read()
+        return read_response_limited(
+            response,
+            max_bytes=response_limit_from_env("MIROFISH_LLM_MAX_RESPONSE_BYTES", 16 * 1024 * 1024),
+        )

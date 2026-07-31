@@ -138,6 +138,17 @@ type SessionReader interface {
 type ListTimelineInput struct {
 	TenantID  string
 	SessionID string
+	Offset    int
+	Limit     int
+}
+
+type TimelinePage struct {
+	Items         []TimelineEventRecord `json:"items"`
+	Offset        int                   `json:"offset"`
+	AppliedLimit  int                   `json:"applied_limit"`
+	ReturnedCount int                   `json:"returned_count"`
+	HasMore       bool                  `json:"has_more"`
+	NextOffset    int                   `json:"next_offset,omitempty"`
 }
 
 type TimelineEventRecord struct {
@@ -165,10 +176,25 @@ type TimelineReader interface {
 	ListTimeline(context.Context, ListTimelineInput) ([]TimelineEventRecord, error)
 }
 
+type TimelinePageReader interface {
+	ListTimelinePage(context.Context, ListTimelineInput) (TimelinePage, error)
+}
+
 type ListEventsInput struct {
 	TenantID  string
 	SessionID string
 	Status    string
+	Offset    int
+	Limit     int
+}
+
+type EventPage struct {
+	Items         []EventRecord `json:"items"`
+	Offset        int           `json:"offset"`
+	AppliedLimit  int           `json:"applied_limit"`
+	ReturnedCount int           `json:"returned_count"`
+	HasMore       bool          `json:"has_more"`
+	NextOffset    int           `json:"next_offset,omitempty"`
 }
 
 type GetEventInput struct {
@@ -198,6 +224,10 @@ type EventRecord struct {
 type EventReader interface {
 	ListEvents(context.Context, ListEventsInput) ([]EventRecord, error)
 	GetEvent(context.Context, GetEventInput) (EventRecord, error)
+}
+
+type EventPageReader interface {
+	ListEventsPage(context.Context, ListEventsInput) (EventPage, error)
 }
 
 type AdoptEventInput struct {
@@ -1155,6 +1185,12 @@ session_scope AS (
    AND s.session_id = $2::uuid
   LIMIT 1
 ),
+run_lock AS MATERIALIZED (
+  SELECT pg_advisory_xact_lock(hashtextextended(
+    $1::text || ':' || session_scope.run_id::text || ':worldline-events', 0
+  )) AS locked
+  FROM session_scope
+),
 input_event_ids AS (
   SELECT
     value::uuid AS event_id,
@@ -1206,6 +1242,7 @@ saved_path_insert AS (
     $7,
     NULLIF($8, '')::uuid
   FROM session_scope
+  CROSS JOIN run_lock
   JOIN event_selection
     ON event_selection.input_count > 0
    AND event_selection.input_count = event_selection.matched_count
@@ -1313,9 +1350,34 @@ func (s *SQLSessionStore) StartSession(ctx context.Context, input StartSessionIn
 		return SessionRun{}, &AppError{Code: "VALIDATION_FAILED", Message: "worldline session admission payload must be JSON serializable"}
 	}
 	query := `WITH tenant_context AS MATERIALIZED (
-  SELECT app_set_tenant_context($1::uuid, NULLIF($7, '')::uuid, false)
-),
-workflow_insert AS (
+	  SELECT app_set_tenant_context($1::uuid, NULLIF($7, '')::uuid, false)
+	),
+	project_lock AS MATERIALIZED (
+	  SELECT pg_advisory_xact_lock(hashtextextended(
+	    $1::text || ':' || $2::text || ':worldline-current-world', 0
+	  )) AS locked
+	  FROM tenant_context
+	),
+	admission_guard AS (
+	  SELECT tenant_context.tenant_id
+	  FROM tenant_context
+	  CROSS JOIN project_lock
+	  WHERE NOT EXISTS (
+	    SELECT 1
+	    FROM worldline_sessions
+	    WHERE tenant_id = $1::uuid
+	      AND project_id = $2::uuid
+	      AND lifecycle = 'active'
+	  )
+	  AND NOT EXISTS (
+	    SELECT 1
+	    FROM worldline_goal_starts
+	    WHERE tenant_id = $1::uuid
+	      AND project_id = $2::uuid
+	      AND status IN ('queued', 'casting', 'preparing', 'starting')
+	  )
+	),
+	workflow_insert AS (
   INSERT INTO workflow_runs (
     tenant_id,
     run_id,
@@ -1337,7 +1399,7 @@ workflow_insert AS (
     'queued',
     NULLIF($7, '')::uuid,
     ''
-  FROM tenant_context
+	  FROM admission_guard
   RETURNING run_id
 ),
 session_insert AS (
@@ -1385,7 +1447,7 @@ SELECT
   1,
   $10::jsonb
 FROM session_insert`
-	_, err = s.execer.ExecContext(
+	result, err := s.execer.ExecContext(
 		ctx,
 		query,
 		tenantID,
@@ -1401,6 +1463,11 @@ FROM session_insert`
 	)
 	if err != nil {
 		return SessionRun{}, &AppError{Code: "WORKFLOW_ADMISSION_FAILED", Message: err.Error()}
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return SessionRun{}, &AppError{Code: "WORKFLOW_ADMISSION_FAILED", Message: "worldline session admission result could not be verified"}
+	} else if affected == 0 {
+		return SessionRun{}, &AppError{Code: "WORLDLINE_GOAL_START_ACTIVE", Message: "project already has an active worldline goal-start or current world"}
 	}
 	return SessionRun{
 		RunID:        runID,
@@ -1912,14 +1979,51 @@ func NewSQLTimelineReader(config SQLTimelineReaderConfig) *SQLTimelineReader {
 	}
 }
 
+const maximumWorldlinePageSize = 500
+
+func normalizeWorldlinePageLimit(input, configuredDefault int) int {
+	limit := input
+	if limit <= 0 {
+		limit = configuredDefault
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > maximumWorldlinePageSize {
+		return maximumWorldlinePageSize
+	}
+	return limit
+}
+
+func normalizeWorldlinePageOffset(offset int) int {
+	if offset < 0 {
+		return 0
+	}
+	return offset
+}
+
 func (r *SQLTimelineReader) ListTimeline(ctx context.Context, input ListTimelineInput) ([]TimelineEventRecord, error) {
+	page, err := r.listTimelinePage(ctx, input, r.limit, 0, false)
+	if err != nil {
+		return nil, err
+	}
+	return page.Items, nil
+}
+
+func (r *SQLTimelineReader) ListTimelinePage(ctx context.Context, input ListTimelineInput) (TimelinePage, error) {
+	limit := normalizeWorldlinePageLimit(input.Limit, r.limit)
+	offset := normalizeWorldlinePageOffset(input.Offset)
+	return r.listTimelinePage(ctx, input, limit, offset, true)
+}
+
+func (r *SQLTimelineReader) listTimelinePage(ctx context.Context, input ListTimelineInput, limit, offset int, paged bool) (TimelinePage, error) {
 	tenantID := strings.TrimSpace(input.TenantID)
 	sessionID := strings.TrimSpace(input.SessionID)
 	if tenantID == "" || sessionID == "" {
-		return nil, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id and session_id are required"}
+		return TimelinePage{}, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id and session_id are required"}
 	}
 	if r.queryer == nil {
-		return nil, &AppError{Code: "WORLDLINE_TIMELINE_BACKEND_UNCONFIGURED", Message: "worldline timeline backend is not configured"}
+		return TimelinePage{}, &AppError{Code: "WORLDLINE_TIMELINE_BACKEND_UNCONFIGURED", Message: "worldline timeline backend is not configured"}
 	}
 	query := `
 SELECT
@@ -1951,25 +2055,44 @@ LEFT JOIN worldline_events ref
 WHERE s.tenant_id::text = $1
   AND s.session_id::text = $2
   AND e.workflow_type = 'worldline_session'
+
 ORDER BY e.sequence ASC, e.created_at ASC
 LIMIT $3`
-	rows, err := queryWorldlineTenantSQL(ctx, r.queryer, tenantID, query, tenantID, sessionID, r.limit)
+	args := []any{tenantID, sessionID, limit}
+	if paged {
+		query += " OFFSET $4"
+		args = append(args, offset)
+		args[2] = limit + 1
+	}
+	rows, err := queryWorldlineTenantSQL(ctx, r.queryer, tenantID, query, args...)
 	if err != nil {
-		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
+		return TimelinePage{}, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
 	}
 	defer rows.Close()
 	records := []TimelineEventRecord{}
 	for rows.Next() {
 		record, err := scanTimelineEventRecord(rows)
 		if err != nil {
-			return nil, err
+			return TimelinePage{}, err
 		}
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
+		return TimelinePage{}, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
 	}
-	return records, nil
+	page := TimelinePage{
+		Items:         records,
+		Offset:        offset,
+		AppliedLimit:  limit,
+		ReturnedCount: len(records),
+	}
+	if paged && len(records) > limit {
+		page.HasMore = true
+		page.Items = records[:limit]
+		page.ReturnedCount = limit
+		page.NextOffset = offset + limit
+	}
+	return page, nil
 }
 
 func scanTimelineEventRecord(rows SQLRows) (TimelineEventRecord, error) {
@@ -2018,14 +2141,28 @@ func NewSQLEventReader(config SQLEventReaderConfig) *SQLEventReader {
 }
 
 func (r *SQLEventReader) ListEvents(ctx context.Context, input ListEventsInput) ([]EventRecord, error) {
+	page, err := r.listEventsPage(ctx, input, r.limit, 0, false)
+	if err != nil {
+		return nil, err
+	}
+	return page.Items, nil
+}
+
+func (r *SQLEventReader) ListEventsPage(ctx context.Context, input ListEventsInput) (EventPage, error) {
+	limit := normalizeWorldlinePageLimit(input.Limit, r.limit)
+	offset := normalizeWorldlinePageOffset(input.Offset)
+	return r.listEventsPage(ctx, input, limit, offset, true)
+}
+
+func (r *SQLEventReader) listEventsPage(ctx context.Context, input ListEventsInput, limit, offset int, paged bool) (EventPage, error) {
 	tenantID := strings.TrimSpace(input.TenantID)
 	sessionID := strings.TrimSpace(input.SessionID)
 	status := strings.TrimSpace(input.Status)
 	if tenantID == "" || sessionID == "" {
-		return nil, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id and session_id are required"}
+		return EventPage{}, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id and session_id are required"}
 	}
 	if r.queryer == nil {
-		return nil, &AppError{Code: "WORLDLINE_EVENT_BACKEND_UNCONFIGURED", Message: "worldline event backend is not configured"}
+		return EventPage{}, &AppError{Code: "WORLDLINE_EVENT_BACKEND_UNCONFIGURED", Message: "worldline event backend is not configured"}
 	}
 
 	query := `
@@ -2062,25 +2199,42 @@ WHERE s.tenant_id::text = $1
 	query += fmt.Sprintf(`
 ORDER BY e.step ASC, e.created_at ASC
 LIMIT $%d`, len(args)+1)
-	args = append(args, r.limit)
+	args = append(args, limit)
+	if paged {
+		args[len(args)-1] = limit + 1
+		query += fmt.Sprintf(" OFFSET $%d", len(args)+1)
+		args = append(args, offset)
+	}
 
 	rows, err := queryWorldlineTenantSQL(ctx, r.queryer, tenantID, query, args...)
 	if err != nil {
-		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
+		return EventPage{}, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
 	}
 	defer rows.Close()
 	records := []EventRecord{}
 	for rows.Next() {
 		record, err := scanEventRecord(rows)
 		if err != nil {
-			return nil, err
+			return EventPage{}, err
 		}
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
+		return EventPage{}, &AppError{Code: "WORLDLINE_QUERY_FAILED", Message: err.Error()}
 	}
-	return records, nil
+	page := EventPage{
+		Items:         records,
+		Offset:        offset,
+		AppliedLimit:  limit,
+		ReturnedCount: len(records),
+	}
+	if paged && len(records) > limit {
+		page.HasMore = true
+		page.Items = records[:limit]
+		page.ReturnedCount = limit
+		page.NextOffset = offset + limit
+	}
+	return page, nil
 }
 
 func (r *SQLEventReader) GetEvent(ctx context.Context, input GetEventInput) (EventRecord, error) {
@@ -2281,6 +2435,12 @@ candidate_scope AS (
     AND e.status = 'candidate'
   LIMIT 1
 ),
+run_lock AS MATERIALIZED (
+  SELECT pg_advisory_xact_lock(hashtextextended(
+    $1::text || ':' || candidate_scope.run_id::text || ':worldline-events', 0
+  )) AS locked
+  FROM candidate_scope
+),
 updated_event AS (
   UPDATE worldline_events
   SET
@@ -2289,6 +2449,7 @@ updated_event AS (
     kind = COALESCE(NULLIF($5, ''), worldline_events.kind),
     updated_at = now()
   FROM candidate_scope
+  CROSS JOIN run_lock
   WHERE worldline_events.tenant_id = candidate_scope.tenant_id
     AND worldline_events.project_id = candidate_scope.project_id
     AND worldline_events.session_id = candidate_scope.session_id
@@ -2472,6 +2633,12 @@ candidate_scope AS (
     AND e.status = 'candidate'
   LIMIT 1
 ),
+run_lock AS MATERIALIZED (
+  SELECT pg_advisory_xact_lock(hashtextextended(
+    $1::text || ':' || candidate_scope.run_id::text || ':worldline-events', 0
+  )) AS locked
+  FROM candidate_scope
+),
 updated_event AS (
   UPDATE worldline_events
   SET
@@ -2479,6 +2646,7 @@ updated_event AS (
     lifecycle = 'canon_reference',
     updated_at = now()
   FROM candidate_scope
+  CROSS JOIN run_lock
   WHERE worldline_events.tenant_id = candidate_scope.tenant_id
     AND worldline_events.project_id = candidate_scope.project_id
     AND worldline_events.session_id = candidate_scope.session_id
@@ -2696,12 +2864,19 @@ candidate_scope AS (
     AND e.status = 'candidate'
   LIMIT 1
 ),
+run_lock AS MATERIALIZED (
+  SELECT pg_advisory_xact_lock(hashtextextended(
+    $1::text || ':' || candidate_scope.run_id::text || ':worldline-events', 0
+  )) AS locked
+  FROM candidate_scope
+),
 updated_event AS (
   UPDATE worldline_events
   SET
     status = 'rejected',
     updated_at = now()
   FROM candidate_scope
+  CROSS JOIN run_lock
   WHERE worldline_events.tenant_id = candidate_scope.tenant_id
     AND worldline_events.project_id = candidate_scope.project_id
     AND worldline_events.session_id = candidate_scope.session_id
@@ -2931,6 +3106,12 @@ session_scope AS (
    AND s.session_id = $2::uuid
   LIMIT 1
 ),
+run_lock AS MATERIALIZED (
+  SELECT pg_advisory_xact_lock(hashtextextended(
+    $1::text || ':' || session_scope.run_id::text || ':worldline-events', 0
+  )) AS locked
+  FROM session_scope
+),
 variable_insert AS (
   INSERT INTO worldline_variables (
     tenant_id,
@@ -2956,6 +3137,7 @@ variable_insert AS (
     $8,
     NULLIF($9, '')::uuid
   FROM session_scope
+  CROSS JOIN run_lock
   RETURNING
     variable_id,
     session_id,

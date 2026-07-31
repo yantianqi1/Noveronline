@@ -9,6 +9,7 @@ from typing import Any, Callable, Protocol
 from uuid import UUID
 
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
 
 from mirofish_agents.common.context import AgentContext
 from mirofish_agents.seed.sequential_reader import (
@@ -26,6 +27,12 @@ from mirofish_agents.seed.sequential_reader import (
 WRITER_REVIEW_WORKFLOW_TYPE = "writer_review"
 WRITER_REVIEW_MODULE_KEY = "writer_reviewer"
 WRITER_REVIEW_TASK_QUEUE = "writer-reviewer"
+WRITER_REVIEW_ACTIVITY_RETRY_POLICY = RetryPolicy(
+    initial_interval=timedelta(seconds=5),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(minutes=1),
+    maximum_attempts=3,
+)
 
 _SEVERITIES = {"low", "medium", "high", "critical"}
 _CATEGORIES = {
@@ -610,6 +617,7 @@ class WriterReviewWorkflow:
             payload,
             start_to_close_timeout=timedelta(minutes=15),
             schedule_to_close_timeout=timedelta(hours=1),
+            retry_policy=WRITER_REVIEW_ACTIVITY_RETRY_POLICY,
         )
 
 

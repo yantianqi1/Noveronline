@@ -267,13 +267,13 @@ const TOP_LEVEL_ROUTES: { prefix: RegExp; toGo: (rest: string, query: string) =>
   // Character console run-scoped routes mount at the TOP level too. The deep
   // proposal-adoption path must be matched BEFORE the generic nested rule below,
   // otherwise the generic one stops at "/proposals" and drops the rest.
-  // /api/projects/{id}/character-interactions/{interactionId}/proposals/{assetId}/adoptions
-  //   → /v1/character-interactions/{interactionId}/proposals/{assetId}/adoptions
+  // /api/projects/{id}/character-interactions/{interactionId}/proposals/{assetId}[/adoptions|/rejections]
+  //   → /v1/character-interactions/{interactionId}/proposals/{assetId}[...]
   {
-    prefix: /^character-interactions\/([^/]+)\/proposals\/([^/]+)\/adoptions$/,
+    prefix: /^character-interactions\/([^/]+)\/proposals\/([^/]+)(\/adoptions|\/rejections)$/,
     toGo: (rest, query) => {
-      const m = rest.match(/^character-interactions\/([^/]+)\/proposals\/([^/]+)\/adoptions$/)!;
-      return `/v1/character-interactions/${encodeURIComponent(m[1])}/proposals/${encodeURIComponent(m[2])}/adoptions${query}`;
+      const m = rest.match(/^character-interactions\/([^/]+)\/proposals\/([^/]+)(\/adoptions|\/rejections)$/)!;
+      return `/v1/character-interactions/${encodeURIComponent(m[1])}/proposals/${encodeURIComponent(m[2])}${m[3]}${query}`;
     },
   },
   // /api/projects/{id}/character-interactions/{interactionId}[/turns|/events|/dialogue|/proposals|/chapter-drafts]
@@ -301,6 +301,14 @@ function matchAny(patterns: RegExp[], rest: string): RegExpMatchArray | null {
   return null;
 }
 
+function hasUnsafePathCharacters(value: string): boolean {
+  return /[\u0000-\u001f\u007f?#]/.test(value);
+}
+
+function encodePathSegments(value: string): string {
+  return value.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+}
+
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 async function handle(
@@ -310,6 +318,10 @@ async function handle(
   const { projectId, path } = await context.params;
   const rest = (path ?? []).join("/");
   const method = request.method.toUpperCase() as Method;
+
+  if (hasUnsafePathCharacters(projectId) || hasUnsafePathCharacters(rest)) {
+    return Response.json({ error: { code: "NOT_FOUND", message: "未知的项目接口" } }, { status: 404 });
+  }
 
   if (
     method !== "GET" &&
@@ -340,7 +352,7 @@ async function handle(
     if (topLevel) {
       goPath = topLevel.toGo(rest, query);
     } else if (matchAny(PROJECT_PATHS[method] ?? [], rest)) {
-      goPath = `/v1/projects/${encodeURIComponent(projectId)}/${rest}${query}`;
+      goPath = `/v1/projects/${encodeURIComponent(projectId)}/${encodePathSegments(rest)}${query}`;
     }
   }
 

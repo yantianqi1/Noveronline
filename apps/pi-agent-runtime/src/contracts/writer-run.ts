@@ -33,6 +33,7 @@ export interface WriterRunInput {
       expected_version?: number;
       action?: "rewrite" | "expand" | "condense" | "polish" | "correct" | "custom";
     };
+    thread_id?: string;
     llm_resolution?: {
       module_key: string;
       channel_id: string;

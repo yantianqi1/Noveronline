@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 from uuid import UUID
 
 from mirofish_agents.common.context import AgentContext
+from mirofish_agents.common.http import read_response_limited, response_limit_from_env
 from mirofish_agents.llm.model_capabilities import effective_supports_json
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
@@ -1088,4 +1089,7 @@ def _parse_aes_gcm_envelope(envelope: str) -> tuple[str, str, bytes, bytes, byte
 
 def _urlopen_bytes(request: Request) -> bytes:
     with urlopen(request, timeout=60) as response:
-        return response.read()
+        return read_response_limited(
+            response,
+            max_bytes=response_limit_from_env("MIROFISH_LLM_MAX_RESPONSE_BYTES", 16 * 1024 * 1024),
+        )

@@ -107,7 +107,16 @@ export function withTemporalCancellation(
     const context = Context.current();
     initializeTemporalCheckpointState(context);
     context.heartbeat(temporalHeartbeatDetails(context, "started"));
-    const timer = setInterval(() => context.heartbeat(temporalHeartbeatDetails(context, "running")), 500);
+    const heartbeat = () => {
+      try {
+        void Promise.resolve(context.heartbeat(temporalHeartbeatDetails(context, "running"))).catch((error: unknown) => {
+          console.warn("Pi writer heartbeat failed", error);
+        });
+      } catch (error) {
+        console.warn("Pi writer heartbeat failed", error);
+      }
+    };
+    const timer = setInterval(heartbeat, 500);
     try {
       const result = await activity(payload);
       if (context.cancellationSignal.aborted) {

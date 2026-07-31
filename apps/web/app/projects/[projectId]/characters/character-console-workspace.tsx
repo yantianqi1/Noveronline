@@ -15,6 +15,7 @@ import {
   fetchCharacterProposals,
   fetchCharacterTurns,
   readCharacterConsoleSelection,
+  rejectCharacterProposal,
   startCharacterDialogue,
   updateCharacterInteractionStatus,
 } from "@/lib/api/character-console-client";
@@ -65,6 +66,7 @@ export function CharacterConsoleWorkspace({ projectId }: { projectId: string }) 
   const [descending, setDescending] = useState(false);
   const [busy, setBusy] = useState(false);
   const [sending, setSending] = useState(false);
+  const [proposalBusyId, setProposalBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -83,10 +85,10 @@ export function CharacterConsoleWorkspace({ projectId }: { projectId: string }) 
     let cancelled = false;
     (async () => {
       try {
-        const token = await fetchCsrfToken().catch(() => null);
+        const token = await fetchCsrfToken();
         const [sess, ints] = await Promise.all([
-          fetchWorldlineSessions(sel.project_id, sel.tenant_id).catch(() => []),
-          fetchCharacterInteractions(sel.project_id, sel.tenant_id).catch(() => []),
+          fetchWorldlineSessions(sel.project_id, sel.tenant_id),
+          fetchCharacterInteractions(sel.project_id, sel.tenant_id),
         ]);
         if (cancelled) return;
         setCsrfToken(token);
@@ -141,8 +143,8 @@ export function CharacterConsoleWorkspace({ projectId }: { projectId: string }) 
       setActionError(null);
       try {
         const [t, p] = await Promise.all([
-          fetchCharacterTurns(selection.project_id, selection.tenant_id, interaction.interaction_id).catch(() => []),
-          fetchCharacterProposals(selection.project_id, selection.tenant_id, interaction.interaction_id).catch(() => []),
+          fetchCharacterTurns(selection.project_id, selection.tenant_id, interaction.interaction_id),
+          fetchCharacterProposals(selection.project_id, selection.tenant_id, interaction.interaction_id),
         ]);
         setTurns(t);
         setProposals(p.filter((prop) => prop.lifecycle !== "canon"));
@@ -197,12 +199,10 @@ export function CharacterConsoleWorkspace({ projectId }: { projectId: string }) 
         // Ask the world for its reaction, then fold it into the stream.
         const reaction = await startCharacterDialogue(selection.project_id, selection.tenant_id, csrfToken, active.interaction_id, {
           in_response_to: myTurn.turn_id,
-        }).catch(() => null);
-        if (reaction) setTurns((prev) => [...prev, reaction]);
+        });
+        setTurns((prev) => [...prev, reaction]);
         // New proposals may have arrived with the reaction.
-        const next = await fetchCharacterProposals(selection.project_id, selection.tenant_id, active.interaction_id).catch(
-          () => [],
-        );
+        const next = await fetchCharacterProposals(selection.project_id, selection.tenant_id, active.interaction_id);
         setProposals(next.filter((prop) => prop.lifecycle !== "canon"));
       } catch (error) {
         setActionError(error instanceof Error ? error.message : "没能送出，请重试。");
@@ -218,6 +218,7 @@ export function CharacterConsoleWorkspace({ projectId }: { projectId: string }) 
   const handleAdoptProposal = useCallback(
     async (proposal: CharacterProposal) => {
       if (!selection || !csrfToken || !active) return;
+      setProposalBusyId(proposal.asset_id);
       setActionError(null);
       try {
         await adoptCharacterProposal(
@@ -230,14 +231,35 @@ export function CharacterConsoleWorkspace({ projectId }: { projectId: string }) 
         setProposals((prev) => prev.filter((p) => p.asset_id !== proposal.asset_id));
       } catch (error) {
         setActionError(error instanceof Error ? error.message : "采纳失败，请重试。");
+      } finally {
+        setProposalBusyId(null);
       }
     },
     [selection, csrfToken, active],
   );
 
-  const handleRejectProposal = useCallback((proposal: CharacterProposal) => {
-    setProposals((prev) => prev.filter((p) => p.asset_id !== proposal.asset_id));
-  }, []);
+  const handleRejectProposal = useCallback(
+    async (proposal: CharacterProposal) => {
+      if (!selection || !csrfToken || !active) return;
+      setProposalBusyId(proposal.asset_id);
+      setActionError(null);
+      try {
+        await rejectCharacterProposal(
+          selection.project_id,
+          selection.tenant_id,
+          csrfToken,
+          active.interaction_id,
+          proposal.asset_id,
+        );
+        setProposals((prev) => prev.filter((p) => p.asset_id !== proposal.asset_id));
+      } catch (error) {
+        setActionError(error instanceof Error ? error.message : "暂不采纳失败，请重试。");
+      } finally {
+        setProposalBusyId(null);
+      }
+    },
+    [selection, csrfToken, active],
+  );
 
   // ── Save / handoff ────────────────────────────────────────────────────────
 
@@ -380,6 +402,7 @@ export function CharacterConsoleWorkspace({ projectId }: { projectId: string }) 
                       proposals={isReplay ? [] : proposals}
                       onAdoptProposal={handleAdoptProposal}
                       onRejectProposal={handleRejectProposal}
+                      proposalBusyId={proposalBusyId}
                     />
                   </div>
                 </div>

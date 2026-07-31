@@ -51,6 +51,7 @@ Git history 负责保存历史。当前工作树不再保留中途 handoff、追
 - `37-frontend-module-inventory.md`：前端必须具备的模块与产品面清单，供 Agent 确认范围；不规定实现顺序或编码步骤。
 - `42-seed-batched-enrichment.md`：Seed 富化阶段（agent_profiles / archive_candidates）从单发全量改为确定性分批喂料 + 完整性对账补漏 + 就绪度瓷砖流式的实施设计；状态 `proposal`，落地重开 P5-005-B 验证。
 - `44-full-module-bug-audit.md`：`apps/api` / `apps/web` / `apps/agent-runtime` / `apps/pi-agent-runtime` / `infra` 全模块只读缺陷审查；含 6 项已逐条复核的高危项（采纳授权缺失、采纳接口越权、goal-start 双跑、写作台丢未存编辑、导出漏软删过滤、资产写入漏租户上下文）、按模块分级的其余发现、1 项已否决的误报存档和分梯队处置顺序。
+- `46-prelaunch-bug-audit-round2.md`：上线前第二轮只读缺陷审查（2026-07-31，6 路并行专项 + 主审复核）；含 3 项已复核 BLOCKER 鉴权缺口、8 项已复核 MAJOR 与按模块分级的其余发现和四梯队处置顺序。
 
 ## 总体决策
 

@@ -3024,6 +3024,7 @@ def test_temporal_worldline_worker_registers_step_prepare_and_auto_evolution_act
     ]
     assert [activity.__name__ for activity in components["activities"]] == [
         "worldline_step_activity",
+        "worldline_step_failure_activity",
         "worldline_prepare_activity",
         "worldline_auto_evolution_step_activity",
         "worldline_auto_evolution_finalize_activity",

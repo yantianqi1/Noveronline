@@ -554,9 +554,15 @@ FOR UPDATE`, scope.TenantID, candidateID).Scan(&projectID, &reviewStatus, &opera
 			if operation != "create" && reviewStatus != "conflict" {
 				// allow conflict path to create if user chooses create semantics via accept_create
 			}
-			if _, err := tx.ExecContext(ctx, `UPDATE assets SET lifecycle=$3, enabled=true, updated_at=now()
-WHERE tenant_id=$1::uuid AND asset_id=$2::uuid AND lifecycle='candidate'`, scope.TenantID, candidateID, lifecycle); err != nil {
+			assetUpdate, err := tx.ExecContext(ctx, `UPDATE assets SET lifecycle=$3, enabled=true, updated_at=now()
+WHERE tenant_id=$1::uuid AND asset_id=$2::uuid AND lifecycle='candidate'`, scope.TenantID, candidateID, lifecycle)
+			if err != nil {
 				return err
+			}
+			if affected, err := assetUpdate.RowsAffected(); err != nil {
+				return err
+			} else if affected != 1 {
+				return appError(CodeConflict, "candidate asset is no longer actionable")
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE asset_candidate_proposals
 SET review_status='accepted', accepted_asset_id=$2::uuid, reviewed_by=NULLIF($3,'')::uuid, reviewed_at=now(), updated_at=now()

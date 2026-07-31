@@ -400,14 +400,17 @@ describe("runPiWriterRunActivity", () => {
       "writer.token", "writer.token",
       "writer.draft.saved", "writer.run.completed"
     ]);
-    expect(workflows.map((event) => event.key)).toEqual([
+    expect(workflows.slice(0, 7).map((event) => event.key)).toEqual([
       "run:started",
       "tool:call-project:started", "tool:call-project:completed",
       "tool:call-world-rules:started", "tool:call-world-rules:completed",
-      "tool:call-character-profile:started", "tool:call-character-profile:completed",
-      "composer:token:1", "composer:token:2",
-      "draft:saved", "run:completed"
+      "tool:call-character-profile:started", "tool:call-character-profile:completed"
     ]);
+    const tokenEvents = workflows.filter((event) => event.type === "writer.token");
+    expect(tokenEvents).toHaveLength(2);
+    expect(tokenEvents.every((event) => event.key?.startsWith("composer:pi-writer:v1:writer_composer:composer:0:"))).toBe(true);
+    expect(tokenEvents.map((event) => event.payload.chunk_index)).toEqual([1, 2]);
+    expect(tokenEvents.every((event) => event.payload.provider_call_id === event.key?.split(":token:")[0].slice("composer:".length))).toBe(true);
     const worldRulePublic = workflows.find((event) => event.key === "tool:call-world-rules:completed")?.payload;
     expect(worldRulePublic?.result).toEqual({
       items: [{ rule_evidence_id: "rule-1", category: "magic", confidence: 0.9 }]

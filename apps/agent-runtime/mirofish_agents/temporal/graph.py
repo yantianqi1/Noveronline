@@ -12,6 +12,7 @@ from datetime import timedelta
 from typing import Any, Callable, Protocol
 
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
 
 from mirofish_agents.common.context import AgentContext
 from mirofish_agents.llm_quota import PostgresQuotaStore, ProviderQuotaGate, QuotaAwareJSONChatClient
@@ -28,6 +29,12 @@ from mirofish_agents.seed.sequential_reader import (
 
 
 GRAPH_TASK_QUEUE = "graph-heavy"
+GRAPH_ACTIVITY_RETRY_POLICY = RetryPolicy(
+    initial_interval=timedelta(seconds=5),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(minutes=1),
+    maximum_attempts=3,
+)
 STORY_GRAPH_BUILD_MODULE_KEY = "story_graph_build"
 GRAPH_BOND_GENERATION_MODULE_KEY = "graph_bond_generator"
 STORY_GRAPH_BUILD_WORKFLOW_TYPE = "story_graph_build"
@@ -572,6 +579,24 @@ class PostgresStoryGraphBuilder:
                         "options": safe_options,
                     }
                 )
+                existing = self._find_ready_snapshot(
+                    cursor,
+                    context=context,
+                    source_hash=source_hash,
+                )
+                if existing is not None:
+                    connection.commit()
+                    return {
+                        "status": "completed",
+                        "module_key": STORY_GRAPH_BUILD_MODULE_KEY,
+                        "graph_id": existing["graph_id"],
+                        "node_count": existing["node_count"],
+                        "edge_count": existing["edge_count"],
+                        "evidence_count": 0,
+                        "layout_count": 0,
+                        "cluster_count": 0,
+                        "replayed": True,
+                    }
                 self._insert_snapshot(
                     cursor,
                     context=context,
@@ -618,6 +643,36 @@ class PostgresStoryGraphBuilder:
             "evidence_count": evidence_count,
             "layout_count": layout_count,
             "cluster_count": len(clusters),
+        }
+
+    def _find_ready_snapshot(
+        self,
+        cursor: Any,
+        *,
+        context: AgentContext,
+        source_hash: str,
+    ) -> dict[str, Any] | None:
+        build_run_id = _uuid_or_none(context.run_id)
+        if build_run_id is None:
+            return None
+        cursor.execute(
+            """SELECT graph_id::text, node_count, edge_count
+               FROM story_graph_snapshots
+              WHERE tenant_id = %s AND project_id = %s
+                AND build_run_id = %s::uuid
+                AND source_version_hash = %s
+                AND status = 'ready'
+              ORDER BY created_at DESC
+              LIMIT 1""",
+            (context.tenant_id, context.project_id, build_run_id, source_hash),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "graph_id": str(_row_value(row, "graph_id", 0)),
+            "node_count": _count_value(_row_value(row, "node_count", 1)),
+            "edge_count": _count_value(_row_value(row, "edge_count", 2)),
         }
 
     def _fetch_entities(self, cursor: Any, context: AgentContext) -> list[dict[str, Any]]:
@@ -738,6 +793,10 @@ class PostgresStoryGraphBuilder:
         return _rows(cursor.fetchall())
 
     def _next_snapshot_version(self, cursor: Any, context: AgentContext) -> int:
+        cursor.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"story-graph:{context.tenant_id}:{context.project_id}",),
+        )
         cursor.execute(
             """SELECT COALESCE(max(version), 0) + 1 AS next_version
                FROM story_graph_snapshots
@@ -2970,6 +3029,7 @@ class StoryGraphBuildWorkflow:
             payload,
             start_to_close_timeout=timedelta(minutes=30),
             schedule_to_close_timeout=timedelta(hours=2),
+            retry_policy=GRAPH_ACTIVITY_RETRY_POLICY,
         )
 
 
@@ -2982,6 +3042,7 @@ class GraphBondGenerationWorkflow:
             payload,
             start_to_close_timeout=timedelta(minutes=30),
             schedule_to_close_timeout=timedelta(hours=2),
+            retry_policy=GRAPH_ACTIVITY_RETRY_POLICY,
         )
 
 

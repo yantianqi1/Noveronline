@@ -1200,14 +1200,18 @@ type recordingCharacterDialogueStarter struct {
 }
 
 type recordingCharacterProposalStore struct {
-	listInput   characterconsole.ListProposalsInput
-	adoptInput  characterconsole.AdoptProposalInput
-	proposals   []characterconsole.ProposalRecord
-	adoption    characterconsole.ProposalAdoption
-	listErr     error
-	adoptErr    error
-	listCalled  bool
-	adoptCalled bool
+	listInput    characterconsole.ListProposalsInput
+	adoptInput   characterconsole.AdoptProposalInput
+	rejectInput  characterconsole.RejectProposalInput
+	proposals    []characterconsole.ProposalRecord
+	adoption     characterconsole.ProposalAdoption
+	rejection    characterconsole.ProposalRejection
+	listErr      error
+	adoptErr     error
+	rejectErr    error
+	listCalled   bool
+	adoptCalled  bool
+	rejectCalled bool
 }
 
 func (s *recordingCharacterProposalStore) ListProposals(_ context.Context, input characterconsole.ListProposalsInput) ([]characterconsole.ProposalRecord, error) {
@@ -1226,6 +1230,15 @@ func (s *recordingCharacterProposalStore) AdoptProposal(_ context.Context, input
 		return characterconsole.ProposalAdoption{}, s.adoptErr
 	}
 	return s.adoption, nil
+}
+
+func (s *recordingCharacterProposalStore) RejectProposal(_ context.Context, input characterconsole.RejectProposalInput) (characterconsole.ProposalRejection, error) {
+	s.rejectInput = input
+	s.rejectCalled = true
+	if s.rejectErr != nil {
+		return characterconsole.ProposalRejection{}, s.rejectErr
+	}
+	return s.rejection, nil
 }
 
 func (s *recordingCharacterDialogueStarter) StartCharacterDialogue(_ context.Context, input workflows.StartCharacterDialogueInput) (workflows.CharacterDialogueRun, error) {
@@ -3744,6 +3757,26 @@ func TestUnsafeActorSensitiveCookieRoutesRequireCSRFBeforeAuthorizerAndStores(t 
 			}
 		}
 	})
+
+	for _, path := range []string{
+		"/v1/projects/project-123/analysis-runs",
+		"/v1/analysis-runs/run-123/cancel",
+		"/v1/analysis-runs/run-123/import-assets",
+	} {
+		t.Run("analysis_"+strings.ReplaceAll(strings.Trim(path, "/"), "/", "_"), func(t *testing.T) {
+			server := newDevelopmentServer(Config{SessionAuthSecret: "test-secret"})
+			request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"upload_id":"upload-123"}`))
+			request.Header.Set("X-Tenant-Id", "tenant-123")
+			request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+			response := httptest.NewRecorder()
+
+			server.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("analysis mutation %s bypassed cookie CSRF: status=%d body=%s", path, response.Code, response.Body.String())
+			}
+		})
+	}
 }
 
 func TestMountedMutationRoutesRequireCookieCSRFAheadOfDomainHandlers(t *testing.T) {
@@ -13233,9 +13266,11 @@ func TestListArchiveMemoriesUsesTenantProjectAssetScopeAndSanitizedRows(t *testi
 			UpdatedAt:  "2026-07-05T00:00:00Z",
 		}},
 	}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader})
-	request := httptest.NewRequest(http.MethodGet, "/v1/archive-assets/asset-1/memories?project_id=project-123", nil)
+	assetReader := &recordingAssetReader{asset: assets.Record{AssetID: "asset-1", ProjectID: "project-123"}}
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetReader: assetReader, ArchiveMemoryReader: reader, Authorizer: &recordingAuthorizer{}})
+	request := httptest.NewRequest(http.MethodGet, "/v1/archive-assets/asset-1/memories?project_id=malicious-project", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -13271,9 +13306,11 @@ func TestListArchiveMemoryEventsUsesTenantProjectAssetScopeAndSanitizedRows(t *t
 			CreatedAt: "2026-07-05T00:00:00Z",
 		}},
 	}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, ArchiveMemoryReader: reader})
-	request := httptest.NewRequest(http.MethodGet, "/v1/archive-assets/asset-1/memory-events?project_id=project-123", nil)
+	assetReader := &recordingAssetReader{asset: assets.Record{AssetID: "asset-1", ProjectID: "project-123"}}
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetReader: assetReader, ArchiveMemoryReader: reader, Authorizer: &recordingAuthorizer{}})
+	request := httptest.NewRequest(http.MethodGet, "/v1/archive-assets/asset-1/memory-events?project_id=malicious-project", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -13296,9 +13333,11 @@ func TestListArchiveMemoryEventsUsesTenantProjectAssetScopeAndSanitizedRows(t *t
 }
 
 func TestListArchiveMemoriesWithoutReaderFailsExplicitly(t *testing.T) {
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}})
+	assetReader := &recordingAssetReader{asset: assets.Record{AssetID: "asset-1", ProjectID: "project-123"}}
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetReader: assetReader, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodGet, "/v1/archive-assets/asset-1/memories?project_id=project-123", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -14974,9 +15013,10 @@ func TestGetAssetIngestionUsesTenantRunScopeAndPublicWorkflowMetadata(t *testing
 			UpdatedAt:    "2026-07-04T00:01:00Z",
 		},
 	}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetIngestionReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetIngestionReader: reader, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodGet, "/v1/asset-ingestions/ingestion-run-123", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -15082,9 +15122,10 @@ func TestGetStyleExtractionUsesTenantRunScopeAndPublicWorkflowMetadata(t *testin
 			UpdatedAt:    "2026-07-05T00:01:00Z",
 		},
 	}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, StyleExtractionReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, StyleExtractionReader: reader, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodGet, "/v1/style-extractions/style-run-123", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -18209,9 +18250,10 @@ func TestListSeedRunsUsesConfiguredReaderAndReturnsOnlyPublicMetadata(t *testing
 			},
 		},
 	}
-	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedRunReader: reader})
+	server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedRunReader: reader, Authorizer: &recordingAuthorizer{}})
 	request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/seed-runs", nil)
 	request.Header.Set("X-Tenant-Id", "tenant-123")
+	request.Header.Set("X-User-Id", "user-123")
 	response := httptest.NewRecorder()
 
 	server.ServeHTTP(response, request)
@@ -18232,6 +18274,67 @@ func TestListSeedRunsUsesConfiguredReaderAndReturnsOnlyPublicMetadata(t *testing
 	if body.Items[0].Progress != 15 || body.Items[0].Message != "parse_file pending" {
 		t.Fatalf("unexpected seed run metadata: %#v", body.Items[0])
 	}
+}
+
+func TestWorkflowReadRoutesRequireProjectAuthorization(t *testing.T) {
+	denied := &auth.AppError{Code: auth.CodeAccessDenied, Message: "private policy detail"}
+
+	t.Run("seed run list", func(t *testing.T) {
+		reader := &recordingSeedRunReader{runs: []workflows.WorkflowRun{{RunID: "run-1"}}}
+		authorizer := &recordingAuthorizer{err: denied}
+		server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, SeedRunReader: reader, Authorizer: authorizer})
+		request := httptest.NewRequest(http.MethodGet, "/v1/projects/project-123/seed-runs", nil)
+		request.Header.Set("X-Tenant-Id", "tenant-123")
+		request.Header.Set("X-User-Id", "user-123")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusForbidden || reader.listInput.ProjectID != "" {
+			t.Fatalf("expected denial before seed reader, status=%d reader=%#v", response.Code, reader.listInput)
+		}
+		if len(authorizer.inputs) != 1 || authorizer.inputs[0].ProjectID != "project-123" || authorizer.inputs[0].Permission != auth.PermissionProjectRead {
+			t.Fatalf("unexpected seed authorization: %#v", authorizer.inputs)
+		}
+	})
+
+	t.Run("asset ingestion detail", func(t *testing.T) {
+		reader := &recordingAssetIngestionReader{run: workflows.WorkflowRun{RunID: "run-1", ProjectID: "project-123"}}
+		authorizer := &recordingAuthorizer{err: denied}
+		server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, AssetIngestionReader: reader, Authorizer: authorizer})
+		request := httptest.NewRequest(http.MethodGet, "/v1/asset-ingestions/run-1", nil)
+		request.Header.Set("X-Tenant-Id", "tenant-123")
+		request.Header.Set("X-User-Id", "user-123")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusForbidden || reader.input.RunID != "run-1" {
+			t.Fatalf("expected denied asset ingestion detail, status=%d reader=%#v", response.Code, reader.input)
+		}
+		if len(authorizer.inputs) != 1 || authorizer.inputs[0].ProjectID != "project-123" || authorizer.inputs[0].Permission != auth.PermissionProjectRead {
+			t.Fatalf("unexpected asset ingestion authorization: %#v", authorizer.inputs)
+		}
+	})
+
+	t.Run("style extraction detail", func(t *testing.T) {
+		reader := &recordingStyleExtractionReader{run: workflows.WorkflowRun{RunID: "run-1", ProjectID: "project-123"}}
+		authorizer := &recordingAuthorizer{err: denied}
+		server := newDevelopmentServer(Config{WriterStarter: &recordingStarter{}, StyleExtractionReader: reader, Authorizer: authorizer})
+		request := httptest.NewRequest(http.MethodGet, "/v1/style-extractions/run-1", nil)
+		request.Header.Set("X-Tenant-Id", "tenant-123")
+		request.Header.Set("X-User-Id", "user-123")
+		response := httptest.NewRecorder()
+
+		server.ServeHTTP(response, request)
+
+		if response.Code != http.StatusForbidden || reader.input.RunID != "run-1" {
+			t.Fatalf("expected denied style extraction detail, status=%d reader=%#v", response.Code, reader.input)
+		}
+		if len(authorizer.inputs) != 1 || authorizer.inputs[0].ProjectID != "project-123" || authorizer.inputs[0].Permission != auth.PermissionProjectRead {
+			t.Fatalf("unexpected style extraction authorization: %#v", authorizer.inputs)
+		}
+	})
 }
 
 func TestGetProjectReadinessUsesTenantProjectScopeAndReturnsPublicSnapshot(t *testing.T) {

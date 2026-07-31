@@ -27,6 +27,16 @@ type AdoptProposalInput struct {
 	Note          string
 }
 
+type RejectProposalInput struct {
+	TenantID      string
+	ProjectID     string
+	InteractionID string
+	AssetID       string
+	ActorUserID   string
+	RequestID     string
+	Note          string
+}
+
 type ProposalRecord struct {
 	AssetID       string `json:"asset_id"`
 	ProjectID     string `json:"project_id"`
@@ -50,9 +60,18 @@ type ProposalAdoption struct {
 	Status        string `json:"status"`
 }
 
+type ProposalRejection struct {
+	AssetID       string `json:"asset_id"`
+	ProjectID     string `json:"project_id"`
+	InteractionID string `json:"interaction_id"`
+	ProposalType  string `json:"proposal_type"`
+	Status        string `json:"status"`
+}
+
 type ProposalStore interface {
 	ListProposals(context.Context, ListProposalsInput) ([]ProposalRecord, error)
 	AdoptProposal(context.Context, AdoptProposalInput) (ProposalAdoption, error)
+	RejectProposal(context.Context, RejectProposalInput) (ProposalRejection, error)
 }
 
 type DisabledProposalStore struct{}
@@ -65,6 +84,10 @@ func (DisabledProposalStore) ListProposals(context.Context, ListProposalsInput) 
 
 func (DisabledProposalStore) AdoptProposal(context.Context, AdoptProposalInput) (ProposalAdoption, error) {
 	return ProposalAdoption{}, &AppError{Code: "CHARACTER_PROPOSAL_BACKEND_UNCONFIGURED", Message: "character proposal backend is not configured"}
+}
+
+func (DisabledProposalStore) RejectProposal(context.Context, RejectProposalInput) (ProposalRejection, error) {
+	return ProposalRejection{}, &AppError{Code: "CHARACTER_PROPOSAL_BACKEND_UNCONFIGURED", Message: "character proposal backend is not configured"}
 }
 
 type SQLProposalStore struct {
@@ -176,6 +199,71 @@ func (s *SQLProposalStore) AdoptProposal(ctx context.Context, input AdoptProposa
 	}
 	if err := tx.Commit(); err != nil {
 		return ProposalAdoption{}, proposalAdoptionFailed()
+	}
+	return result, nil
+}
+
+func (s *SQLProposalStore) RejectProposal(ctx context.Context, input RejectProposalInput) (ProposalRejection, error) {
+	input = normalizeRejectProposalInput(input)
+	if input.TenantID == "" || input.ProjectID == "" || input.InteractionID == "" || input.AssetID == "" || input.ActorUserID == "" {
+		return ProposalRejection{}, &AppError{Code: "VALIDATION_FAILED", Message: "tenant_id, project_id, interaction_id, asset_id, and actor_user_id are required"}
+	}
+	if s.db == nil {
+		return ProposalRejection{}, &AppError{Code: "CHARACTER_PROPOSAL_BACKEND_UNCONFIGURED", Message: "character proposal backend is not configured"}
+	}
+	tx, err := s.beginScopedTx(ctx, input.TenantID, input.ActorUserID)
+	if err != nil {
+		return ProposalRejection{}, proposalRejectionFailed()
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	proposal, _, err := lockProposal(ctx, tx, AdoptProposalInput{
+		TenantID: input.TenantID, ProjectID: input.ProjectID,
+		InteractionID: input.InteractionID, AssetID: input.AssetID,
+		ActorUserID: input.ActorUserID, RequestID: input.RequestID,
+	})
+	if err != nil {
+		return ProposalRejection{}, err
+	}
+	if proposal.Lifecycle != "candidate" {
+		return ProposalRejection{}, &AppError{Code: "CHARACTER_PROPOSAL_ALREADY_DECIDED", Message: "character proposal is no longer a candidate"}
+	}
+
+	var result ProposalRejection
+	err = tx.QueryRowContext(ctx, `WITH rejected AS (
+  UPDATE assets
+  SET lifecycle = 'rejected',
+      payload_jsonb = payload_jsonb || jsonb_build_object('rejection_note', $5::text),
+      updated_at = now()
+  WHERE tenant_id::text = $1 AND project_id::text = $2
+    AND asset_id::text = $3 AND lifecycle = 'candidate'
+  RETURNING asset_id::text, project_id::text,
+            payload_jsonb->>'interaction_id' AS interaction_id,
+            payload_jsonb->>'proposal_type' AS proposal_type
+), audit AS (
+  INSERT INTO audit_logs (
+    tenant_id, actor_user_id, action, resource_type, resource_id,
+    project_id, run_id, request_id, metadata_jsonb
+  )
+  SELECT $1::uuid, $6::uuid, 'character.proposal.reject', 'asset',
+         rejected.asset_id::uuid, rejected.project_id::uuid, NULL, $7,
+         jsonb_build_object('interaction_id', $4::text, 'proposal_type', rejected.proposal_type, 'note', $5::text)
+  FROM rejected
+)
+SELECT asset_id, project_id, interaction_id, proposal_type, 'rejected'
+FROM rejected`, input.TenantID, input.ProjectID, input.AssetID, input.InteractionID,
+		input.Note, input.ActorUserID, input.RequestID).Scan(
+		&result.AssetID, &result.ProjectID, &result.InteractionID,
+		&result.ProposalType, &result.Status,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ProposalRejection{}, &AppError{Code: "CHARACTER_PROPOSAL_ALREADY_DECIDED", Message: "character proposal is no longer a candidate"}
+	}
+	if err != nil {
+		return ProposalRejection{}, proposalRejectionFailed()
+	}
+	if err := tx.Commit(); err != nil {
+		return ProposalRejection{}, proposalRejectionFailed()
 	}
 	return result, nil
 }
@@ -402,6 +490,17 @@ func normalizeAdoptProposalInput(input AdoptProposalInput) AdoptProposalInput {
 	return input
 }
 
+func normalizeRejectProposalInput(input RejectProposalInput) RejectProposalInput {
+	input.TenantID = strings.TrimSpace(input.TenantID)
+	input.ProjectID = strings.TrimSpace(input.ProjectID)
+	input.InteractionID = strings.TrimSpace(input.InteractionID)
+	input.AssetID = strings.TrimSpace(input.AssetID)
+	input.ActorUserID = strings.TrimSpace(input.ActorUserID)
+	input.RequestID = strings.TrimSpace(input.RequestID)
+	input.Note = strings.TrimSpace(input.Note)
+	return input
+}
+
 func proposalPayloadText(payload map[string]any, key string) string {
 	value, _ := payload[key].(string)
 	return strings.TrimSpace(value)
@@ -413,4 +512,8 @@ func proposalQueryFailed() *AppError {
 
 func proposalAdoptionFailed() *AppError {
 	return &AppError{Code: "CHARACTER_PROPOSAL_ADOPTION_FAILED", Message: "character proposal adoption failed"}
+}
+
+func proposalRejectionFailed() *AppError {
+	return &AppError{Code: "CHARACTER_PROPOSAL_REJECTION_FAILED", Message: "character proposal rejection failed"}
 }

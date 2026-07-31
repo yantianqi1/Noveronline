@@ -12,6 +12,8 @@
 -- apps/agent-runtime/mirofish_agents/temporal/assets.py so reindex runs stay
 -- idempotent over trigger-written rows.
 
+BEGIN;
+
 CREATE OR REPLACE FUNCTION assets_search_index_sync() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -119,3 +121,5 @@ DO UPDATE SET
   tags_jsonb = EXCLUDED.tags_jsonb,
   payload_jsonb = EXCLUDED.payload_jsonb,
   updated_at = now();
+
+COMMIT;

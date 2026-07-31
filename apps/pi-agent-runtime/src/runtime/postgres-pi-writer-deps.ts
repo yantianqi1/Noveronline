@@ -364,8 +364,8 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
           scene_id: sceneId,
           mode
         },
-        chapter,
-        scene,
+        chapter: limitWriterContextRecord(chapter),
+        scene: limitWriterContextRecord(scene),
         neighbor_scenes: neighborScenes
       };
     }
@@ -384,7 +384,7 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
             AND asset_id = ANY($3::uuid[])
           ORDER BY pinned DESC, updated_at DESC LIMIT 50`,
         [request.tenant_id, request.project_id, request.selected_asset_ids]);
-      return { assets: result.rows };
+      return { assets: result.rows.map(limitWriterContextRecord) };
     }
     case "query_world_rules": {
       const seedRules = await queryWithTenantContext<Record<string, unknown>>(db, request,
@@ -409,7 +409,7 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
           ORDER BY pinned DESC, updated_at DESC
           LIMIT 40`,
         [request.tenant_id, request.project_id, rulesChapterOrder]);
-      return { rules: [...seedRules.rows, ...assetRules.rows].slice(0, 50) };
+      return { rules: [...seedRules.rows, ...assetRules.rows].slice(0, 50).map(limitWriterContextRecord) };
     }
     case "query_character_profile": {
       const entityProfiles = await queryWithTenantContext<Record<string, unknown>>(db, request,
@@ -653,7 +653,7 @@ async function queryManuscriptContext(
       }
       return {
         target: { chapter_id: chapterId, scene_id: sceneId },
-        manuscript_blocks: [...sceneBlocks.rows, ...nearby]
+        manuscript_blocks: [...sceneBlocks.rows, ...nearby].map(limitWriterContextRecord)
       };
     }
   }
@@ -696,7 +696,7 @@ async function queryManuscriptContext(
       }
       return {
         target: { chapter_id: chapterId, scene_id: sceneId },
-        manuscript_blocks: [...chapterBlocks.rows, ...nearby]
+        manuscript_blocks: [...chapterBlocks.rows, ...nearby].map(limitWriterContextRecord)
       };
     }
   }
@@ -714,7 +714,7 @@ async function queryManuscriptContext(
   );
   return {
     target: { chapter_id: chapterId, scene_id: sceneId },
-    manuscript_blocks: fallback.rows.reverse()
+    manuscript_blocks: fallback.rows.reverse().map(limitWriterContextRecord)
   };
 }
 
@@ -882,6 +882,17 @@ function errorMessage(error: unknown): string {
 function truncateAssetPreview(value: string): string {
   const trimmed = value.trim();
   return trimmed.length > ASSET_QUERY_PREVIEW_MAX ? `${trimmed.slice(0, ASSET_QUERY_PREVIEW_MAX)}…` : trimmed;
+}
+
+function limitWriterContextRecord<T extends Record<string, unknown> | null>(record: T): T {
+  if (!record) return record;
+  const limited = { ...record };
+  for (const key of ["brief", "outline", "content_text", "rule_text", "summary"]) {
+    if (typeof limited[key] === "string") {
+      limited[key] = truncateAssetPreview(limited[key] as string);
+    }
+  }
+  return limited as T;
 }
 
 function toVectorLiteral(embedding: number[]): string {
@@ -1096,6 +1107,7 @@ function gatedResult(currentChapterOrder: number | null): Record<string, unknown
 // gate): an always_on asset revealed only later must not leak early. Capped
 // small so the constant prefix can't flood the writing context.
 const ALWAYS_ON_MAX = 8;
+const WORLDLINE_TIMELINE_MAX_EVENTS = 200;
 async function loadAlwaysOnAssets(
   options: PostgresPiWriterDepsOptions,
   request: ExecuteWriterToolRequest
@@ -1151,20 +1163,28 @@ async function loadWorldlineTimeline(
     await queryWithTenantContext<Record<string, unknown>>(
       db,
       request,
-      `SELECT e.event_id::text, e.session_id::text, e.step, e.title, e.summary, e.kind,
-              COALESCE(e.state_changes_jsonb, '{}'::jsonb)::text AS state_changes
-         FROM worldline_events e
-        WHERE e.tenant_id = $1 AND e.project_id = $2
-          AND e.session_id = ANY($3::uuid[])
-          AND e.status = 'canon'
-        ORDER BY e.session_id, e.step ASC, e.created_at ASC`,
-      [request.tenant_id, request.project_id, sessionIds]
+      `SELECT event_id, session_id, step, title, summary, kind, state_changes, total_event_count
+         FROM (
+           SELECT e.event_id::text, e.session_id::text, e.step, e.title, e.summary, e.kind,
+                  COALESCE(e.state_changes_jsonb, '{}'::jsonb)::text AS state_changes,
+                  COUNT(*) OVER (PARTITION BY e.session_id) AS total_event_count,
+                  ROW_NUMBER() OVER (PARTITION BY e.session_id ORDER BY e.step ASC, e.created_at ASC) AS event_rank
+             FROM worldline_events e
+            WHERE e.tenant_id = $1 AND e.project_id = $2
+              AND e.session_id = ANY($3::uuid[])
+              AND e.status = 'canon'
+         ) timeline
+        WHERE event_rank <= $4
+        ORDER BY session_id, step ASC`,
+      [request.tenant_id, request.project_id, sessionIds, WORLDLINE_TIMELINE_MAX_EVENTS]
     )
   ).rows;
 
   const bySession = new Map<string, import("../activities/pi-writer-activities.js").WorldlineTimelineEvent[]>();
+  const totalBySession = new Map<string, number>();
   for (const row of rows) {
     const sessionId = String(row.session_id);
+    totalBySession.set(sessionId, Number(row.total_event_count) || 0);
     const event: import("../activities/pi-writer-activities.js").WorldlineTimelineEvent = {
       event_id: String(row.event_id),
       session_id: sessionId,
@@ -1185,7 +1205,9 @@ async function loadWorldlineTimeline(
   // still surface (empty) so the run visibly reports an empty timeline.
   const timelines = sessionIds.map((sessionId) => ({
     session_id: sessionId,
-    events: bySession.get(sessionId) ?? []
+    events: bySession.get(sessionId) ?? [],
+    total_event_count: totalBySession.get(sessionId) ?? 0,
+    truncated: (totalBySession.get(sessionId) ?? 0) > (bySession.get(sessionId)?.length ?? 0)
   }));
   return { timelines };
 }
@@ -2019,40 +2041,65 @@ async function appendWriterThreadMessage(db: QueryExecutor, request: AppendWrite
   await execWithTenantContext(
     db,
     request,
-    `WITH ensured AS (
+    `WITH run_lock AS MATERIALIZED (
+       SELECT pg_advisory_xact_lock(hashtextextended(
+         concat_ws(':', $1::text, $2::text, COALESCE(NULLIF($7, ''), NULLIF($5, ''), 'writer-thread')), 0
+       )) AS acquired
+     ), explicit_thread AS MATERIALIZED (
        SELECT thread_id
          FROM writer_threads
         WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND status = 'active'
-        ORDER BY updated_at DESC
+          AND NULLIF($7, '')::uuid IS NOT NULL
+          AND thread_id = NULLIF($7, '')::uuid
+     ), run_thread AS MATERIALIZED (
+       SELECT message.thread_id
+         FROM writer_thread_messages AS message
+         JOIN writer_threads AS thread ON thread.tenant_id = message.tenant_id
+                                      AND thread.project_id = message.project_id
+                                      AND thread.thread_id = message.thread_id
+                                      AND thread.status = 'active'
+        WHERE message.tenant_id = $1::uuid
+          AND message.project_id = $2::uuid
+          AND message.run_id = NULLIF($5, '')::uuid
+        ORDER BY message.created_at DESC
         LIMIT 1
-     ), created AS (
-       INSERT INTO writer_threads (tenant_id, project_id, title, status)
-       SELECT $1::uuid, $2::uuid, 'Writer thread', 'active'
-        WHERE NOT EXISTS (SELECT 1 FROM ensured)
-       RETURNING thread_id
-     ), thread AS (
-       SELECT thread_id FROM ensured
+     ), thread AS MATERIALIZED (
+       SELECT thread_id FROM explicit_thread
        UNION ALL
-       SELECT thread_id FROM created
+       SELECT thread_id FROM run_thread
+        WHERE NOT EXISTS (SELECT 1 FROM explicit_thread)
        LIMIT 1
-     ), next_sequence AS (
+     ), existing AS MATERIALIZED (
+       SELECT 1
+         FROM writer_thread_messages AS message
+         JOIN thread ON thread.thread_id = message.thread_id
+        WHERE message.tenant_id = $1::uuid
+          AND message.project_id = $2::uuid
+          AND message.run_id = NULLIF($5, '')::uuid
+          AND message.role = $3
+          AND COALESCE(message.metadata_jsonb->>'kind', '') = COALESCE($6::jsonb->>'kind', '')
+          AND COALESCE(message.metadata_jsonb->>'draft_id', '') = COALESCE($6::jsonb->>'draft_id', '')
+     ), next_sequence AS MATERIALIZED (
        SELECT COALESCE(MAX(m.sequence), 0) + 1 AS sequence
-         FROM writer_thread_messages m
+         FROM writer_thread_messages AS m
          JOIN thread ON thread.thread_id = m.thread_id
+         CROSS JOIN run_lock
         WHERE m.tenant_id = $1::uuid AND m.project_id = $2::uuid
      )
      INSERT INTO writer_thread_messages (
        tenant_id, project_id, thread_id, role, body, run_id, sequence, metadata_jsonb
      )
      SELECT $1::uuid, $2::uuid, thread.thread_id, $3, $4, NULLIF($5, '')::uuid, next_sequence.sequence, $6::jsonb
-       FROM thread, next_sequence`,
+       FROM thread, next_sequence
+      WHERE NOT EXISTS (SELECT 1 FROM existing)`,
     [
       request.tenant_id,
       request.project_id,
       request.role,
       body,
       request.run_id,
-      JSON.stringify(metadata)
+      JSON.stringify(metadata),
+      request.thread_id ?? ""
     ]
   );
   await execWithTenantContext(
@@ -2062,8 +2109,18 @@ async function appendWriterThreadMessage(db: QueryExecutor, request: AppendWrite
         SET updated_at = now()
       WHERE tenant_id = $1::uuid
         AND project_id = $2::uuid
-        AND status = 'active'`,
-    [request.tenant_id, request.project_id]
+        AND status = 'active'
+        AND thread_id = COALESCE(
+          NULLIF($3, '')::uuid,
+          (SELECT message.thread_id
+             FROM writer_thread_messages AS message
+            WHERE message.tenant_id = $1::uuid
+              AND message.project_id = $2::uuid
+              AND message.run_id = NULLIF($4, '')::uuid
+            ORDER BY message.created_at DESC
+            LIMIT 1)
+        )`,
+    [request.tenant_id, request.project_id, request.thread_id ?? "", request.run_id]
   );
 }
 

@@ -101,6 +101,13 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
   // Candidate rail is inline at the wide band and a drawer below it.
   const [candidateRailOpen, setCandidateRailOpen] = useState(false);
   const pendingVariableLocksRef = useRef<Set<string>>(new Set());
+  const stepPollGenerationRef = useRef(0);
+
+  useEffect(() => {
+    return () => {
+      stepPollGenerationRef.current += 1;
+    };
+  }, []);
 
   /** Resolve an event's involved agents to roster display names (候选卡与时间线
    * 展开共用). Unresolvable ids fall back to names the event text itself names. */
@@ -120,9 +127,9 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
     async (sel: { tenant_id: string; project_id: string }, sessionId: string) => {
       const [sess, tl, evs, vars] = await Promise.all([
         fetchWorldlineSession(sel.project_id, sel.tenant_id, sessionId),
-        fetchWorldlineTimeline(sel.project_id, sel.tenant_id, sessionId).catch(() => []),
-        fetchWorldlineEvents(sel.project_id, sel.tenant_id, sessionId).catch(() => []),
-        fetchWorldlineVariables(sel.project_id, sel.tenant_id, sessionId).catch(() => []),
+        fetchWorldlineTimeline(sel.project_id, sel.tenant_id, sessionId),
+        fetchWorldlineEvents(sel.project_id, sel.tenant_id, sessionId),
+        fetchWorldlineVariables(sel.project_id, sel.tenant_id, sessionId),
       ]);
       // One fetch, one honest partition: candidates wait in the queue, canon
       // feeds the timeline join, rejected stays out of both lanes for good.
@@ -149,14 +156,14 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
     async (sel: { tenant_id: string; project_id: string }, prepareId?: string) => {
       let id = prepareId?.trim() ?? "";
       if (!id) {
-        const preps = await fetchWorldlinePreparations(sel.project_id, sel.tenant_id).catch(() => []);
+        const preps = await fetchWorldlinePreparations(sel.project_id, sel.tenant_id);
         id = preps[0]?.prepare_id ?? "";
       }
       if (!id) {
         setRoster([]);
         return;
       }
-      const agents = await fetchWorldlinePreparedAgents(sel.project_id, sel.tenant_id, id).catch(() => []);
+      const agents = await fetchWorldlinePreparedAgents(sel.project_id, sel.tenant_id, id);
       setRoster(
         agents.map((a) => ({
           id: a.agent_id,
@@ -179,10 +186,10 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
     let cancelled = false;
     (async () => {
       try {
-        const token = await fetchCsrfToken().catch(() => null);
+        const token = await fetchCsrfToken();
         const [sessions, goalStarts] = await Promise.all([
-          fetchWorldlineSessions(sel.project_id, sel.tenant_id).catch(() => []),
-          fetchWorldlineGoalStarts(sel.project_id, sel.tenant_id).catch(() => []),
+          fetchWorldlineSessions(sel.project_id, sel.tenant_id),
+          fetchWorldlineGoalStarts(sel.project_id, sel.tenant_id),
         ]);
         if (cancelled) return;
         setCsrfToken(token);
@@ -190,7 +197,7 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
         const latest = sessions[0];
         if (latest) {
           await loadSessionData(sel, latest.session_id);
-          void loadRoster(sel).catch(() => {});
+          await loadRoster(sel);
         }
         if (!latest) {
           const resumable = goalStarts.find((item) => item.status !== "ready") ?? null;
@@ -246,9 +253,7 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
           return;
         }
         if (gs.prepare_id) {
-          const agents = await fetchWorldlinePreparedAgents(selection.project_id, selection.tenant_id, gs.prepare_id).catch(
-            () => [],
-          );
+          const agents = await fetchWorldlinePreparedAgents(selection.project_id, selection.tenant_id, gs.prepare_id);
           if (!cancelled) {
             setPreparingAgents(
               agents.map((a) => ({
@@ -260,8 +265,10 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
             );
           }
         }
-      } catch {
-        // transient read errors keep polling until the deadline
+      } catch (error) {
+        if (!cancelled) {
+          setActionError(error instanceof Error ? error.message : "整备状态读取失败，请重试。");
+        }
       }
       if (!cancelled && Date.now() < deadline) {
         timer = setTimeout(() => void tick(), GOAL_START_POLL_MS);
@@ -325,6 +332,8 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
     setBusy(true);
     setEvolving(true);
     setActionError(null);
+    const pollGeneration = stepPollGenerationRef.current + 1;
+    stepPollGenerationRef.current = pollGeneration;
     try {
       await startWorldlineStep(selection.project_id, selection.tenant_id, csrfToken, sessionId, {
         mode: mode === "manual" ? "manual" : "director",
@@ -334,7 +343,9 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
       const deadline = Date.now() + STEP_TIMEOUT_MS;
       for (;;) {
         await new Promise((resolve) => setTimeout(resolve, STEP_POLL_MS));
+        if (pollGeneration !== stepPollGenerationRef.current) return;
         const current = await fetchWorldlineSession(selection.project_id, selection.tenant_id, sessionId);
+        if (pollGeneration !== stepPollGenerationRef.current) return;
         if (STEP_SETTLED_STATUSES.has(current.status)) {
           if (current.status === "failed") {
             setActionError("这一步推演失败了，请重试。");
@@ -346,13 +357,23 @@ export function WorldlineWorkspace({ projectId }: { projectId: string }) {
           break;
         }
       }
+      if (pollGeneration !== stepPollGenerationRef.current) return;
       await loadSessionData(selection, sessionId);
     } catch (error) {
+      if (pollGeneration !== stepPollGenerationRef.current) return;
       setActionError(error instanceof Error ? error.message : "推进失败，请重试。");
-      await loadSessionData(selection, sessionId).catch(() => {});
+      try {
+        await loadSessionData(selection, sessionId);
+      } catch (refreshError) {
+        if (pollGeneration === stepPollGenerationRef.current) {
+          setActionError(refreshError instanceof Error ? refreshError.message : "推演结果读取失败，请刷新重试。");
+        }
+      }
     } finally {
-      setBusy(false);
-      setEvolving(false);
+      if (pollGeneration === stepPollGenerationRef.current) {
+        setBusy(false);
+        setEvolving(false);
+      }
     }
   }, [selection, csrfToken, session, mode, loadSessionData]);
 

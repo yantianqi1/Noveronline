@@ -94,7 +94,7 @@ func (s *Server) handleListWorldlineGoalStarts(response http.ResponseWriter, req
 	})
 	if err != nil {
 		code := worldline.ErrorCode(err)
-		writeError(response, request, statusForAppCode(code), code, err.Error(), nil)
+		writeError(response, request, statusForAppCode(code), code, publicAppErrorMessage(code), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, listResponse[worldline.GoalStartRecord]{Items: items})
@@ -118,7 +118,7 @@ func (s *Server) handleGetWorldlineGoalStart(response http.ResponseWriter, reque
 	})
 	if err != nil {
 		code := worldline.ErrorCode(err)
-		writeError(response, request, statusForAppCode(code), code, err.Error(), nil)
+		writeError(response, request, statusForAppCode(code), code, publicAppErrorMessage(code), nil)
 		return
 	}
 	if !s.authorizeProjectRead(response, request, tenantID, record.ProjectID) {

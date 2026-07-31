@@ -8,6 +8,7 @@ from typing import Any, Callable, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
 
 from mirofish_agents.common.context import AgentContext
 from mirofish_agents.seed.sequential_reader import (
@@ -24,6 +25,12 @@ from mirofish_agents.seed.sequential_reader import (
 
 WORLDLINE_PREPARE_WORKFLOW_TYPE = "worldline_preparation"
 WORLDLINE_PREPARE_MODULE_KEY = "worldline_agent_prepare"
+WORLDLINE_PREPARE_ACTIVITY_RETRY_POLICY = RetryPolicy(
+    initial_interval=timedelta(seconds=5),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(minutes=1),
+    maximum_attempts=3,
+)
 
 _SENSITIVE_KEYS = {
     "api_key",
@@ -933,6 +940,7 @@ class WorldlinePrepareWorkflow:
             payload,
             start_to_close_timeout=timedelta(minutes=30),
             schedule_to_close_timeout=timedelta(hours=3),
+            retry_policy=WORLDLINE_PREPARE_ACTIVITY_RETRY_POLICY,
         )
 
 

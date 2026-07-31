@@ -24,6 +24,12 @@
 
 Focused 证据：Go API full、Pi Runtime `138 passed, 4 skipped` + typecheck/build、Web `121 passed, 1 skipped` + typecheck/build、shared-contracts `4 passed`、隔离 Worldline live 与 Pi writer live `2 passed`、`git diff --check` 均通过。该修复不改变 MAIN-100 的 Legacy 授权 gate，也不将 Z-028 的 Z7 browser journey 标记为完成。
 
+## 2026-07-31 上线前第二轮缺陷审查（修复进行中）
+
+只读第二轮上线前审查已完成（6 路并行专项 + 主审复核）。完整报告见 `46-prelaunch-bug-audit-round2.md`。本轮已关闭 **3 个 BLOCKER 鉴权缺口**及 archive-memory 同族读路径，并完成 BFF 路径编码、世界线 timeline/events 显式分页、角色拒绝持久化、Writer unload 保存、Pi token/retry/thread 收敛、Python quota/reindex/HTTP 资源边界、0029 事务与 backfill sentinel、Compose secret/readiness、CI infra job 等修复。当前仍保留 M-S3 注册邮箱验证、部分 Python workflow 同族 retry/idempotency、sessions/saved-paths/goal-starts/prepared-agents 与 collections 显式分页、recovery UI/focus trap 等边界，未将 R2 审计标记为 complete。
+
+当前验证证据：Go `go test ./...`、Python `510 passed, 31 skipped`、Pi `138 passed, 4 skipped` + typecheck/build、Web `123 passed, 1 skipped` + typecheck/build、infra `72 passed`，以及 `git diff --check` 均通过。
+
 ## 2026-07-27 全模块缺陷审计收口
 
 `44-full-module-bug-audit.md` 四个梯队中的确认缺陷已全部闭合，误报保持否决。除第一梯队的采纳权限、写入口 RBAC、goal-start 单活跃与 Writer autosave 外，本轮完成真实库 RLS、workflow attempt fencing、Worldline 失败终态、Pi payload/cast 幂等、LLM capability fail-closed、蒸馏失败指纹重试、上传流式限额、协作 owner 不变量、Temporal/Compose 与 DB/HTTP 资源边界等修复。逐条状态与边界见审计文档 §7。

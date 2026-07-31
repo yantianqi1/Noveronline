@@ -626,6 +626,15 @@ type assetListResponse struct {
 	NextOffset    int             `json:"next_offset,omitempty"`
 }
 
+type worldlinePageResponse[T any] struct {
+	Items         []T  `json:"items"`
+	Offset        int  `json:"offset"`
+	AppliedLimit  int  `json:"applied_limit"`
+	ReturnedCount int  `json:"returned_count"`
+	HasMore       bool `json:"has_more"`
+	NextOffset    int  `json:"next_offset,omitempty"`
+}
+
 type traceExportRequest struct {
 	IncludeFull bool `json:"include_full"`
 }
@@ -1577,6 +1586,8 @@ var actorSensitiveRoutes = []protectedRoute{
 	{name: "seed run cancel", method: http.MethodPost, match: isSeedRunCancelPath},
 	{name: "seed run retry", method: http.MethodPost, match: isSeedRunRetryPath},
 	{name: "seed segment retry", method: http.MethodPost, match: isSeedSegmentRetryPath},
+	{name: "analysis run cancel", method: http.MethodPost, match: isAnalysisRunCancelPath},
+	{name: "analysis assets import", method: http.MethodPost, match: isAnalysisAssetsImportPath},
 	{name: "worldline session step", method: http.MethodPost, match: isWorldlineSessionStepPath},
 	{name: "worldline session auto evolution", method: http.MethodPost, match: isWorldlineSessionAutoEvolutionPath},
 	{name: "worldline session variables", method: http.MethodPost, match: isWorldlineSessionVariablesPath},
@@ -1599,6 +1610,7 @@ var actorSensitiveRoutes = []protectedRoute{
 	{name: "character interaction events", method: http.MethodGet, match: matchCharacterInteractionNestedPath("events")},
 	{name: "character interaction proposals", method: http.MethodGet, match: matchCharacterInteractionNestedPath("proposals")},
 	{name: "character proposal adoption", method: http.MethodPost, match: isCharacterProposalAdoptionPath},
+	{name: "character proposal rejection", method: http.MethodPost, match: isCharacterProposalRejectionPath},
 	{name: "source upload object", method: http.MethodPut, match: isUploadSourceObjectPath},
 	{name: "source upload complete", method: http.MethodPost, match: isCompleteUploadPath},
 	{name: "character interaction mutation", method: http.MethodPatch, match: isCharacterInteractionMutationPath},
@@ -1653,6 +1665,7 @@ var projectActorSensitiveRoutes = []protectedRoute{
 	{name: "manuscript", method: http.MethodGet, match: matchProjectSuffixPath("manuscript")},
 	{name: "manuscript export", method: http.MethodGet, match: matchProjectSuffixPath("manuscript/export")},
 	{name: "seed run start", method: http.MethodPost, match: matchProjectSuffixPath("seed-runs")},
+	{name: "analysis run start", method: http.MethodPost, match: matchProjectSuffixPath("analysis-runs")},
 	{name: "upload create", method: http.MethodPost, match: matchProjectSuffixPath("uploads")},
 	{name: "worldline session start", method: http.MethodPost, match: matchProjectSuffixPath("worldline-sessions")},
 	{name: "worldline goal-start list", method: http.MethodGet, match: matchProjectSuffixPath("worldline-goal-starts")},
@@ -2302,6 +2315,12 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 			return
 		}
 	}
+	// All control-plane JSON bodies are bounded before any handler decoder runs.
+	// Raw source-object uploads are the only intentionally large request body and
+	// are handled by the dedicated object-store path.
+	if request.Body != nil && !isUploadSourceObjectPath(request.URL.Path) {
+		request.Body = http.MaxBytesReader(response, request.Body, 1<<20)
+	}
 
 	switch {
 	case request.Method == http.MethodGet && request.URL.Path == "/healthz":
@@ -2519,6 +2538,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handleListCharacterProposals(response, request)
 	case request.Method == http.MethodPost && isCharacterProposalAdoptionPath(request.URL.Path):
 		s.handleAdoptCharacterProposal(response, request)
+	case request.Method == http.MethodPost && isCharacterProposalRejectionPath(request.URL.Path):
+		s.handleRejectCharacterProposal(response, request)
 	case request.Method == http.MethodPost && isCharacterInteractionNestedPath(request.URL.Path, "chapter-drafts"):
 		s.handleConvertCharacterInteractionToChapterDraft(response, request)
 	case request.Method == http.MethodPatch && isCharacterInteractionMutationPath(request.URL.Path):
@@ -3837,6 +3858,21 @@ func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *htt
 	options["module_key"] = moduleKey
 	options["llm_resolution"] = workflowLLMResolution(primaryResolution)
 	options["required_module_keys"] = requiredModules
+	var writerThreadID string
+	if s.writerThreadStore != nil && strings.TrimSpace(payload.Instruction) != "" {
+		thread, ensureErr := s.writerThreadStore.EnsureThread(request.Context(), workflows.EnsureWriterThreadInput{
+			TenantID:  tenantID,
+			ProjectID: projectID,
+			ActorID:   s.actorUserID(request),
+			Title:     "Writer thread",
+		})
+		if ensureErr != nil || strings.TrimSpace(thread.ThreadID) == "" {
+			writeError(response, request, http.StatusServiceUnavailable, "WRITER_THREAD_MUTATION_FAILED", "writer thread is unavailable", nil)
+			return
+		}
+		writerThreadID = thread.ThreadID
+		options["thread_id"] = writerThreadID
+	}
 	// Worldline attachments have already passed tenant/project admission above;
 	// forward the canonical UUIDs into the workflow for deterministic prefetch.
 	if len(worldlinePathIDs) > 0 {
@@ -3863,24 +3899,17 @@ func (s *Server) handleStartWriterRun(response http.ResponseWriter, request *htt
 		return
 	}
 	// Best-effort persistent thread append for the user instruction (CONN-009).
-	if s.writerThreadStore != nil && strings.TrimSpace(payload.Instruction) != "" {
-		if thread, ensureErr := s.writerThreadStore.EnsureThread(request.Context(), workflows.EnsureWriterThreadInput{
+	if s.writerThreadStore != nil && writerThreadID != "" {
+		_, _ = s.writerThreadStore.AppendMessage(request.Context(), workflows.AppendWriterThreadMessageInput{
 			TenantID:  tenantID,
 			ProjectID: projectID,
+			ThreadID:  writerThreadID,
+			Role:      "user",
+			Body:      strings.TrimSpace(payload.Instruction),
+			RunID:     run.RunID,
 			ActorID:   s.actorUserID(request),
-			Title:     "Writer thread",
-		}); ensureErr == nil {
-			_, _ = s.writerThreadStore.AppendMessage(request.Context(), workflows.AppendWriterThreadMessageInput{
-				TenantID:  tenantID,
-				ProjectID: projectID,
-				ThreadID:  thread.ThreadID,
-				Role:      "user",
-				Body:      strings.TrimSpace(payload.Instruction),
-				RunID:     run.RunID,
-				ActorID:   s.actorUserID(request),
-				Metadata:  map[string]any{"mode": run.Mode},
-			})
-		}
+			Metadata:  map[string]any{"mode": run.Mode},
+		})
 	}
 	writeJSON(response, http.StatusAccepted, startWriterRunResponse{
 		RunID:       run.RunID,
@@ -4158,6 +4187,9 @@ func (s *Server) handleListSeedRuns(response http.ResponseWriter, request *http.
 	projectID := projectIDFromPathWithSuffix(request.URL.Path, "seed-runs")
 	if projectID == "" {
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "project seed route not found", nil)
+		return
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
 		return
 	}
 	runs, err := s.seedRunReader.ListSeedRuns(request.Context(), workflows.ListSeedRunsInput{
@@ -4690,7 +4722,7 @@ func (s *Server) handleListWorldlineSavedPaths(response http.ResponseWriter, req
 		ProjectID: projectID,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), publicAppErrorMessage(worldline.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, listResponse[worldline.SavedPathRecord]{Items: items})
@@ -5064,6 +5096,40 @@ func (s *Server) handleAdoptCharacterProposal(response http.ResponseWriter, requ
 	writeJSON(response, http.StatusOK, result)
 }
 
+func (s *Server) handleRejectCharacterProposal(response http.ResponseWriter, request *http.Request) {
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		writeError(response, request, http.StatusUnauthorized, "UNAUTHENTICATED", "tenant context is required", nil)
+		return
+	}
+	interactionID, assetID := characterProposalRejectionPathParts(request.URL.Path)
+	if interactionID == "" || assetID == "" {
+		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "character proposal rejection route not found", nil)
+		return
+	}
+	interaction, ok := s.authorizeCharacterInteractionCreativeWrite(response, request, tenantID, interactionID)
+	if !ok {
+		return
+	}
+	var payload adoptCharacterProposalRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "invalid character proposal rejection payload", nil)
+		return
+	}
+	result, err := s.characterProposalStore.RejectProposal(request.Context(), characterconsole.RejectProposalInput{
+		TenantID: tenantID, ProjectID: interaction.ProjectID, InteractionID: interactionID,
+		AssetID: assetID, ActorUserID: s.actorUserID(request), RequestID: requestID(request),
+		Note: strings.TrimSpace(payload.Note),
+	})
+	if err != nil {
+		writeCharacterProposalError(response, request, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
 func (s *Server) handleConvertCharacterInteractionToChapterDraft(response http.ResponseWriter, request *http.Request) {
 	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
 	if tenantID == "" {
@@ -5339,10 +5405,34 @@ func (s *Server) handleListWorldlineTimeline(response http.ResponseWriter, reque
 	if _, ok := s.authorizeWorldlineSessionProjectRead(response, request, tenantID, sessionID); !ok {
 		return
 	}
-	items, err := s.worldlineTimelineReader.ListTimeline(request.Context(), worldline.ListTimelineInput{
+	limit, offset, ok := queryWorldlinePage(response, request)
+	if !ok {
+		return
+	}
+	input := worldline.ListTimelineInput{
 		TenantID:  tenantID,
 		SessionID: sessionID,
-	})
+		Offset:    offset,
+		Limit:     limit,
+	}
+	if pageReader, supportsPaging := s.worldlineTimelineReader.(worldline.TimelinePageReader); supportsPaging {
+		page, err := pageReader.ListTimelinePage(request.Context(), input)
+		if err != nil {
+			code := worldline.ErrorCode(err)
+			writeError(response, request, statusForAppCode(code), code, worldlineSessionOwnerPreflightPublicErrorMessage(code), nil)
+			return
+		}
+		writeJSON(response, http.StatusOK, worldlinePageResponse[worldline.TimelineEventRecord]{
+			Items:         page.Items,
+			Offset:        page.Offset,
+			AppliedLimit:  page.AppliedLimit,
+			ReturnedCount: page.ReturnedCount,
+			HasMore:       page.HasMore,
+			NextOffset:    page.NextOffset,
+		})
+		return
+	}
+	items, err := s.worldlineTimelineReader.ListTimeline(request.Context(), input)
 	if err != nil {
 		code := worldline.ErrorCode(err)
 		writeError(response, request, statusForAppCode(code), code, worldlineSessionOwnerPreflightPublicErrorMessage(code), nil)
@@ -5365,11 +5455,35 @@ func (s *Server) handleListWorldlineEvents(response http.ResponseWriter, request
 	if _, ok := s.authorizeWorldlineSessionProjectRead(response, request, tenantID, sessionID); !ok {
 		return
 	}
-	items, err := s.worldlineEventReader.ListEvents(request.Context(), worldline.ListEventsInput{
+	limit, offset, ok := queryWorldlinePage(response, request)
+	if !ok {
+		return
+	}
+	input := worldline.ListEventsInput{
 		TenantID:  tenantID,
 		SessionID: sessionID,
 		Status:    strings.TrimSpace(request.URL.Query().Get("status")),
-	})
+		Offset:    offset,
+		Limit:     limit,
+	}
+	if pageReader, supportsPaging := s.worldlineEventReader.(worldline.EventPageReader); supportsPaging {
+		page, err := pageReader.ListEventsPage(request.Context(), input)
+		if err != nil {
+			code := worldline.ErrorCode(err)
+			writeError(response, request, statusForAppCode(code), code, worldlineSessionOwnerPreflightPublicErrorMessage(code), nil)
+			return
+		}
+		writeJSON(response, http.StatusOK, worldlinePageResponse[worldline.EventRecord]{
+			Items:         page.Items,
+			Offset:        page.Offset,
+			AppliedLimit:  page.AppliedLimit,
+			ReturnedCount: page.ReturnedCount,
+			HasMore:       page.HasMore,
+			NextOffset:    page.NextOffset,
+		})
+		return
+	}
+	items, err := s.worldlineEventReader.ListEvents(request.Context(), input)
 	if err != nil {
 		code := worldline.ErrorCode(err)
 		writeError(response, request, statusForAppCode(code), code, worldlineSessionOwnerPreflightPublicErrorMessage(code), nil)
@@ -5713,7 +5827,7 @@ func (s *Server) handleCreateAsset(response http.ResponseWriter, request *http.R
 		Pinned:       payload.Pinned,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), publicAppErrorMessage(assets.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusCreated, record)
@@ -5805,9 +5919,13 @@ func (s *Server) handleListArchiveMemories(response http.ResponseWriter, request
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "archive asset memories route not found", nil)
 		return
 	}
+	projectID, ok := s.authorizeArchiveAssetProjectRead(response, request, tenantID, assetID)
+	if !ok {
+		return
+	}
 	items, err := s.archiveMemoryReader.ListMemories(request.Context(), assets.ListArchiveMemoriesInput{
 		TenantID:  tenantID,
-		ProjectID: strings.TrimSpace(request.URL.Query().Get("project_id")),
+		ProjectID: projectID,
 		AssetID:   assetID,
 	})
 	if err != nil {
@@ -5828,9 +5946,13 @@ func (s *Server) handleListArchiveMemoryEvents(response http.ResponseWriter, req
 		writeError(response, request, http.StatusNotFound, "NOT_FOUND", "archive asset memory events route not found", nil)
 		return
 	}
+	projectID, ok := s.authorizeArchiveAssetProjectRead(response, request, tenantID, assetID)
+	if !ok {
+		return
+	}
 	items, err := s.archiveMemoryReader.ListMemoryEvents(request.Context(), assets.ListArchiveMemoryEventsInput{
 		TenantID:  tenantID,
-		ProjectID: strings.TrimSpace(request.URL.Query().Get("project_id")),
+		ProjectID: projectID,
 		AssetID:   assetID,
 	})
 	if err != nil {
@@ -5838,6 +5960,27 @@ func (s *Server) handleListArchiveMemoryEvents(response http.ResponseWriter, req
 		return
 	}
 	writeJSON(response, http.StatusOK, listResponse[assets.ArchiveMemoryEventRecord]{Items: items})
+}
+
+func (s *Server) authorizeArchiveAssetProjectRead(response http.ResponseWriter, request *http.Request, tenantID string, assetID string) (string, bool) {
+	record, err := s.assetReader.GetAsset(request.Context(), assets.GetAssetInput{
+		TenantID: tenantID,
+		AssetID:  assetID,
+	})
+	if err != nil {
+		code := assets.ErrorCode(err)
+		writeError(response, request, statusForAppCode(code), code, assetOwnerPreflightPublicErrorMessage(code), nil)
+		return "", false
+	}
+	projectID := strings.TrimSpace(record.ProjectID)
+	if projectID == "" {
+		writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+		return "", false
+	}
+	if !s.authorizeProjectRead(response, request, tenantID, projectID) {
+		return "", false
+	}
+	return projectID, true
 }
 
 func (s *Server) handleAdoptArchiveMemory(response http.ResponseWriter, request *http.Request) {
@@ -6050,6 +6193,9 @@ func (s *Server) handleGetAssetIngestion(response http.ResponseWriter, request *
 		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
 		return
 	}
+	if !s.authorizeGlobalRunOwnerProjectRead(response, request, tenantID, run.ProjectID) {
+		return
+	}
 	writeJSON(response, http.StatusOK, workflowRunToResponse(run))
 }
 
@@ -6115,6 +6261,9 @@ func (s *Server) handleGetStyleExtraction(response http.ResponseWriter, request 
 	if err != nil {
 		code := workflows.ErrorCode(err)
 		writeError(response, request, statusForWorkflowError(err), code, workflowPublicErrorMessage(code), nil)
+		return
+	}
+	if !s.authorizeGlobalRunOwnerProjectRead(response, request, tenantID, run.ProjectID) {
 		return
 	}
 	writeJSON(response, http.StatusOK, workflowRunToResponse(run))
@@ -6305,7 +6454,7 @@ func (s *Server) handleGetStoryGraphCurrent(response http.ResponseWriter, reques
 		ProjectID: projectID,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), publicAppErrorMessage(storygraph.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, current)
@@ -7284,6 +7433,8 @@ func characterProposalPublicErrorMessage(code string) string {
 		return "character proposal was not found"
 	case "CHARACTER_PROPOSAL_ALREADY_ADOPTED":
 		return "character proposal is no longer a candidate"
+	case "CHARACTER_PROPOSAL_ALREADY_DECIDED":
+		return "character proposal is no longer a candidate"
 	case "CHARACTER_PROPOSAL_TARGET_CONFLICT":
 		return "character proposal target is no longer a candidate"
 	case "CHARACTER_PROPOSAL_BACKEND_UNCONFIGURED":
@@ -7292,6 +7443,8 @@ func characterProposalPublicErrorMessage(code string) string {
 		return "character proposal query failed"
 	case "CHARACTER_PROPOSAL_ADOPTION_FAILED":
 		return "character proposal adoption failed"
+	case "CHARACTER_PROPOSAL_REJECTION_FAILED":
+		return "character proposal rejection failed"
 	default:
 		return "character proposal request failed"
 	}
@@ -7369,7 +7522,7 @@ func (s *Server) handleListAgentTraceEvents(response http.ResponseWriter, reques
 			ActorID:   s.actorUserID(request),
 		})
 		if err != nil {
-			writeError(response, request, statusForAppCode(traces.ErrorCode(err)), traces.ErrorCode(err), err.Error(), nil)
+			writeError(response, request, statusForAppCode(traces.ErrorCode(err)), traces.ErrorCode(err), publicAppErrorMessage(traces.ErrorCode(err)), nil)
 			return
 		}
 	}
@@ -7380,7 +7533,7 @@ func (s *Server) handleListAgentTraceEvents(response http.ResponseWriter, reques
 		IncludeFull: includeFull,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(traces.ErrorCode(err)), traces.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(traces.ErrorCode(err)), traces.ErrorCode(err), publicAppErrorMessage(traces.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, listResponse[traces.EventRecord]{Items: items})
@@ -8270,6 +8423,25 @@ func queryOffset(response http.ResponseWriter, request *http.Request, message st
 		return 0, false
 	}
 	return parsedOffset, true
+}
+
+const maxWorldlinePageSize = 500
+
+func queryWorldlinePage(response http.ResponseWriter, request *http.Request) (int, int, bool) {
+	limit := 100
+	if rawLimit := strings.TrimSpace(request.URL.Query().Get("limit")); rawLimit != "" {
+		parsedLimit, err := strconv.Atoi(rawLimit)
+		if err != nil || parsedLimit <= 0 || parsedLimit > maxWorldlinePageSize {
+			writeError(response, request, http.StatusBadRequest, "VALIDATION_FAILED", "worldline limit must be between 1 and 500", nil)
+			return 0, 0, false
+		}
+		limit = parsedLimit
+	}
+	offset, ok := queryOffset(response, request, "worldline offset must be a non-negative integer")
+	if !ok {
+		return 0, 0, false
+	}
+	return limit, offset, true
 }
 
 func queryBool(raw string) bool {
@@ -9170,6 +9342,28 @@ func isCharacterProposalAdoptionPath(path string) bool {
 	return interactionID != "" && assetID != ""
 }
 
+func characterProposalRejectionPathParts(path string) (string, string) {
+	const prefix = "/v1/character-interactions/"
+	remainder, ok := strings.CutPrefix(path, prefix)
+	if !ok {
+		return "", ""
+	}
+	interactionID, remainder, ok := strings.Cut(remainder, "/proposals/")
+	if !ok || !isSinglePathSegment(interactionID) {
+		return "", ""
+	}
+	assetID, suffix, ok := strings.Cut(remainder, "/")
+	if !ok || suffix != "rejections" || !isSinglePathSegment(assetID) {
+		return "", ""
+	}
+	return strings.TrimSpace(interactionID), strings.TrimSpace(assetID)
+}
+
+func isCharacterProposalRejectionPath(path string) bool {
+	interactionID, assetID := characterProposalRejectionPathParts(path)
+	return interactionID != "" && assetID != ""
+}
+
 func workflowRunCancelPathPart(path string) string {
 	const prefix = "/v1/workflow-runs/"
 	remainder, prefixOK := strings.CutPrefix(path, prefix)
@@ -9489,6 +9683,29 @@ func statusForAuthCode(code string) int {
 		return http.StatusForbidden
 	default:
 		return http.StatusServiceUnavailable
+	}
+}
+
+// publicAppErrorMessage is the last HTTP boundary before domain errors leave
+// the process. Domain stores may retain driver details for logs/tests, but a
+// database error must never become an API response.
+func publicAppErrorMessage(code string) string {
+	code = strings.TrimSpace(code)
+	switch {
+	case code == "VALIDATION_FAILED":
+		return "invalid request"
+	case code == "NOT_FOUND":
+		return "resource not found"
+	case strings.Contains(code, "BACKEND_UNCONFIGURED"):
+		return "request backend is not configured"
+	case strings.Contains(code, "QUERY_FAILED") || strings.Contains(code, "READ_FAILED"):
+		return "request could not be read"
+	case strings.Contains(code, "WRITE_FAILED") || strings.Contains(code, "MUTATION_FAILED") || strings.Contains(code, "ADOPTION_FAILED"):
+		return "request could not be saved"
+	case strings.Contains(code, "ACCESS_DENIED") || strings.Contains(code, "FORBIDDEN"):
+		return "access denied"
+	default:
+		return "request failed"
 	}
 }
 
@@ -10058,6 +10275,9 @@ func trimStringSlice(values []string) []string {
 }
 
 func writeError(response http.ResponseWriter, request *http.Request, status int, code string, message string, details map[string]any) {
+	if isInternalErrorMessage(message) {
+		message = publicAppErrorMessage(code)
+	}
 	if details == nil {
 		details = map[string]any{}
 	}
@@ -10069,6 +10289,23 @@ func writeError(response http.ResponseWriter, request *http.Request, status int,
 			RequestID: requestID(request),
 		},
 	})
+}
+
+func isInternalErrorMessage(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	if message == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"pq:", "sqlstate", "syntax error", "relation ", "column ",
+		"duplicate key", "constraint ", "no such table", "undefined table",
+		"dial tcp", "connection refused", "failed to scan",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func requestID(request *http.Request) string {

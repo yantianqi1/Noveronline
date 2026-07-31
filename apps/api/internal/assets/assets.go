@@ -1208,7 +1208,7 @@ WHERE memory.tenant_id::text = $1
   AND memory.asset_id::text = $3
 ORDER BY memory.updated_at DESC, memory.memory_id::text ASC
 LIMIT $4`
-	rows, err := r.queryer.QueryContext(ctx, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ProjectID), strings.TrimSpace(input.AssetID), r.limit)
+	rows, err := queryWithTenantContext(ctx, r.queryer, input.TenantID, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ProjectID), strings.TrimSpace(input.AssetID), r.limit)
 	if err != nil {
 		return nil, &AppError{Code: "ARCHIVE_MEMORY_QUERY_FAILED", Message: err.Error()}
 	}
@@ -1261,7 +1261,7 @@ WHERE event.tenant_id::text = $1
   AND memory.asset_id::text = $3
 ORDER BY event.created_at DESC, event.event_id::text ASC
 LIMIT $4`
-	rows, err := r.queryer.QueryContext(ctx, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ProjectID), strings.TrimSpace(input.AssetID), limit)
+	rows, err := queryWithTenantContext(ctx, r.queryer, input.TenantID, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.ProjectID), strings.TrimSpace(input.AssetID), limit)
 	if err != nil {
 		return nil, &AppError{Code: "ARCHIVE_MEMORY_QUERY_FAILED", Message: err.Error()}
 	}
@@ -1309,7 +1309,7 @@ JOIN assets asset
 WHERE memory.tenant_id::text = $1
   AND memory.memory_id::text = $2
 LIMIT 1`
-	rows, err := r.queryer.QueryContext(ctx, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.MemoryID))
+	rows, err := queryWithTenantContext(ctx, r.queryer, input.TenantID, query, strings.TrimSpace(input.TenantID), strings.TrimSpace(input.MemoryID))
 	if err != nil {
 		return ArchiveMemoryRecord{}, &AppError{Code: "ARCHIVE_MEMORY_QUERY_FAILED", Message: err.Error()}
 	}

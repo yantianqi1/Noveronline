@@ -183,6 +183,8 @@ export interface WorldlineTimelineEvent {
 export interface WorldlineTimeline {
   session_id: string;
   events: WorldlineTimelineEvent[];
+  total_event_count?: number;
+  truncated?: boolean;
 }
 
 export interface OrchestrateWritingBriefRequest extends Omit<ComposeDraftRequest, "writing_brief" | "onToken"> {
@@ -579,6 +581,7 @@ export interface AppendWriterThreadMessageRequest {
   tenant_id: string;
   project_id: string;
   run_id: string;
+  thread_id?: string;
   role: "user" | "agent" | "system" | "approval";
   body: string;
   metadata?: Record<string, unknown>;
@@ -808,6 +811,7 @@ export function createPiWriterRunActivity(deps: Partial<PiWriterRunActivityDeps>
             tenant_id: input.tenant_id,
             project_id: input.project_id,
             run_id: input.run_id,
+            thread_id: input.options.thread_id,
             role: "agent",
             body: candidateReadyThreadBody(draft.content),
             metadata: {
@@ -1050,6 +1054,21 @@ async function runDualStagePiWriterActivity(
     payload,
     idempotency_key: key
   });
+  const recordWorkflowBestEffort = async (
+    eventType: RecordWorkflowEventRequest["event_type"],
+    payload: Record<string, unknown>,
+    key: string
+  ): Promise<void> => {
+    try {
+      await recordWorkflow(eventType, payload, key);
+    } catch (error) {
+      console.warn("Pi writer workflow event recording degraded", {
+        eventType,
+        key,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  };
 
   try {
     if (deps.findCompletedWriterRun) {
@@ -1288,6 +1307,17 @@ async function runDualStagePiWriterActivity(
       0,
       async (apiKey, providerCallID) => {
       let eventWriteChain = Promise.resolve();
+      const enqueueEventWrite = (write: () => Promise<void>): Promise<void> => {
+        eventWriteChain = eventWriteChain
+          .catch(() => undefined)
+          .then(write)
+          .catch((error) => {
+            console.warn("Pi writer ordered event recording degraded", {
+              message: error instanceof Error ? error.message : String(error)
+            });
+          });
+        return eventWriteChain;
+      };
       await recordTrace(orchestrator.module_key, "llm_call_started", resolutionSummary(orchestrator));
       const toolNames: WriterToolName[] = [
         "query_project_context",
@@ -1370,37 +1400,48 @@ async function runDualStagePiWriterActivity(
           return packRetrievalToolResult(toolName, raw, packed);
         },
         onAgentEvent: (event) => {
-          eventWriteChain = eventWriteChain.then(async () => {
-          if (event.type === "tool_execution_start") {
-            await recordWorkflow("writer.tool.started", {
-              tool_call_id: event.toolCallId,
-              tool_name: event.toolName,
-              status: "running"
-            }, `tool:${event.toolCallId}:started`);
-            await recordTrace(orchestrator.module_key, "tool_call", {
-              tool_call_id: event.toolCallId,
-              tool_name: event.toolName,
-              args: event.args
-            }, "full");
-          }
-          if (event.type === "tool_execution_end") {
-            const toolResult = event.result?.details ?? event.result;
-            await recordWorkflow("writer.tool.completed", {
-              tool_call_id: event.toolCallId,
-              tool_name: event.toolName,
-              status: event.isError ? "failed" : "completed",
-              is_error: event.isError,
-              result: publicWriterToolResult(event.toolName, toolResult)
-            }, `tool:${event.toolCallId}:completed`);
-            await recordTrace(orchestrator.module_key, "tool_result", {
-              tool_call_id: event.toolCallId,
-              tool_name: event.toolName,
-              is_error: event.isError,
-              result: toolResult
-            }, "full");
-          }
+          return enqueueEventWrite(async () => {
+            if (event.type === "tool_execution_start") {
+              await recordWorkflowBestEffort("writer.tool.started", {
+                tool_call_id: event.toolCallId,
+                tool_name: event.toolName,
+                status: "running"
+              }, `tool:${event.toolCallId}:started`);
+              try {
+                await recordTrace(orchestrator.module_key, "tool_call", {
+                  tool_call_id: event.toolCallId,
+                  tool_name: event.toolName,
+                  args: event.args
+                }, "full");
+              } catch (error) {
+                console.warn("Pi writer tool trace recording degraded", {
+                  message: error instanceof Error ? error.message : String(error)
+                });
+              }
+            }
+            if (event.type === "tool_execution_end") {
+              const toolResult = event.result?.details ?? event.result;
+              await recordWorkflowBestEffort("writer.tool.completed", {
+                tool_call_id: event.toolCallId,
+                tool_name: event.toolName,
+                status: event.isError ? "failed" : "completed",
+                is_error: event.isError,
+                result: publicWriterToolResult(event.toolName, toolResult)
+              }, `tool:${event.toolCallId}:completed`);
+              try {
+                await recordTrace(orchestrator.module_key, "tool_result", {
+                  tool_call_id: event.toolCallId,
+                  tool_name: event.toolName,
+                  is_error: event.isError,
+                  result: toolResult
+                }, "full");
+              } catch (error) {
+                console.warn("Pi writer tool trace recording degraded", {
+                  message: error instanceof Error ? error.message : String(error)
+                });
+              }
+            }
           });
-          return eventWriteChain;
         }
       });
       await eventWriteChain;
@@ -1438,7 +1479,11 @@ async function runDualStagePiWriterActivity(
         worldline_timelines: worldlineTimelines,
         onToken: async (token) => {
           const index = ++chunkIndex;
-          await recordWorkflow("writer.token", { token, chunk_index: index }, `composer:token:${index}`);
+          await recordWorkflowBestEffort(
+            "writer.token",
+            { token, chunk_index: index, provider_call_id: providerCallID },
+            `composer:${providerCallID}:token:${index}`
+          );
         }
       });
       return result;
@@ -1580,6 +1625,7 @@ async function runDualStagePiWriterActivity(
           tenant_id: input.tenant_id,
           project_id: input.project_id,
           run_id: input.run_id,
+          thread_id: input.options.thread_id,
           role: "agent",
           body: candidateReadyThreadBody(draft.content),
           metadata: {

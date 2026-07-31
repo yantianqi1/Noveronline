@@ -17,6 +17,10 @@ const (
 	CodeAccessDenied        = "AUTH_ACCESS_DENIED"
 	CodeLookupFailed        = "AUTH_LOOKUP_FAILED"
 	CodeValidationFailed    = "VALIDATION_FAILED"
+	// A missing account still runs bcrypt before returning the same public
+	// authentication error as a bad password. This keeps the login path from
+	// becoming an email-enumeration oracle.
+	dummyPasswordHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
 )
 
 type GetCurrentUserInput struct {
@@ -609,7 +613,7 @@ func (a *SQLPasswordAuthenticator) AuthenticatePassword(ctx context.Context, inp
 	if err != nil {
 		return CurrentUser{}, err
 	}
-	if bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)) != nil {
+	if userID == "" || bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)) != nil {
 		return CurrentUser{}, invalidEmailOrPassword()
 	}
 	return a.reader.GetCurrentUser(ctx, GetCurrentUserInput{
@@ -732,7 +736,9 @@ LIMIT 1
 		if err := rows.Close(); err != nil {
 			return "", "", authLookupFailed()
 		}
-		return "", "", invalidEmailOrPassword()
+		// Deliberately use a real bcrypt hash so an unknown email consumes the
+		// same expensive password-check path as an existing account.
+		return "", dummyPasswordHash, nil
 	}
 	var userID string
 	var passwordHash string
@@ -742,7 +748,7 @@ LIMIT 1
 	}
 	if strings.TrimSpace(userID) == "" || strings.TrimSpace(passwordHash) == "" {
 		_ = rows.Close()
-		return "", "", invalidEmailOrPassword()
+		return "", dummyPasswordHash, nil
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()

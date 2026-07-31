@@ -5,7 +5,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, Protocol, TypeVar
 
 from mirofish_agents.common.context import AgentContext
-from mirofish_agents.seed.sequential_reader import LLMFacilityError, ModuleBindingResolution
+from mirofish_agents.seed.sequential_reader import LLMFacilityError, ModuleBindingResolution, _estimate_tokens
 
 from .models import ProviderCallAdmission, ProviderCallRequest, ProviderUsage
 
@@ -168,7 +168,7 @@ def _request(
     for value in input_texts:
         if not isinstance(value, str):
             raise LLMFacilityError("VALIDATION_FAILED", "provider input must be text")
-        input_upper_bound += len(value.encode("utf-8"))
+        input_upper_bound += _estimate_tokens(value)
     module_max_concurrency = _optional_positive_int(resolution.settings.get("max_concurrency"))
     return ProviderCallRequest(
         tenant_id=_required_text(context.tenant_id, "tenant_id"),

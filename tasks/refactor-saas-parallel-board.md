@@ -33,6 +33,7 @@
 | Z-028 | `in_progress` | current | Z0–Z6 `connected` + disposable app-role live 与 Pi local-provider live 2/2；2026-07-27 隔离真实 Go API + Next Web/BFF 启动通过；Z7 仍缺 authenticated zero-start desktop/mobile browser journey |
 | AUDIT-044 | `verified_current` | current | 四个梯队确认缺陷全部修复；误报保持否决；ledger/readiness 至 31；六包隔离 app-role live 与四 runtime full regression 通过 |
 | AUDIT-2026-07-31 | `fixed_verified` | current | 上线前世界线/Writer recall 审查：timeline 全局截断、admission 引用校验、state_changes 丢失、optimistic turn 幽灵消息、picker 吞错/N+1、live shelf 硬编码凭据已修复；focused Go/Pi/Web 验证通过，见 doc 25 §9 |
+| AUDIT-2026-07-31-R2 | `in_progress` | current | doc 46 的 3 个 BLOCKER 与 archive-memory 同族读路径已修复；M-A1–A8、M-P1–P4、M-S1–S2、M-I1–I5 及部分 Go/Python/Minor 已落地，Go/Python/Pi/Web/infra 回归通过。仍待 M-S3 邮箱验证、部分 Python workflow 同族 retry/idempotency、Worldline 其余列表与 collections 显式分页、recovery UI/focus trap 等，未标记 complete |
 
 ## 当前证据
 

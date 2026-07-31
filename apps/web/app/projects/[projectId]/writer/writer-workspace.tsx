@@ -388,7 +388,7 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
   // ── Autosave (per segment) ─────────────────────────────────────────────
 
   const persistSegment = useCallback(
-    async (blockId: string) => {
+    async (blockId: string, options: { keepalive?: boolean } = {}) => {
       if (!selection || !csrfToken) return false;
       const seg = segmentsRef.current.find((s) => s.block_id === blockId);
       if (!seg) return false;
@@ -401,6 +401,7 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
           seg.block_id,
           seg.version,
           seg.content_text,
+          options,
         );
         // Sync the saved version/word_count back without clobbering newer edits.
         setSegments((prev) =>
@@ -436,9 +437,9 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
   );
 
   const queueSegmentSave = useCallback(
-    (blockId: string) => {
+    (blockId: string, options: { keepalive?: boolean } = {}) => {
       const previous = savePromisesRef.current.get(blockId) ?? Promise.resolve(true);
-      const queued = previous.then(() => persistSegment(blockId));
+      const queued = previous.then(() => persistSegment(blockId, options));
       savePromisesRef.current.set(blockId, queued);
       void queued.finally(() => {
         if (savePromisesRef.current.get(blockId) === queued) {
@@ -450,12 +451,12 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
     [persistSegment],
   );
 
-  const flushPendingSegmentSaves = useCallback(async () => {
+  const flushPendingSegmentSaves = useCallback(async (options: { keepalive?: boolean } = {}) => {
     do {
       const blockIds = [...saveTimersRef.current.keys()];
       for (const timer of saveTimersRef.current.values()) clearTimeout(timer);
       saveTimersRef.current.clear();
-      for (const blockId of blockIds) queueSegmentSave(blockId);
+      for (const blockId of blockIds) queueSegmentSave(blockId, options);
 
       const results = await Promise.all([...savePromisesRef.current.values()]);
       if (results.some((saved) => !saved)) return false;
@@ -486,6 +487,25 @@ export function WriterWorkspace({ projectId }: { projectId: string }) {
     },
     [],
   );
+
+  // A navigation or tab close can happen inside the debounce window. Use the
+  // browser's keepalive budget so dirty blocks still reach the same BFF PATCH
+  // route after React starts unmounting; the normal serialized queue remains
+  // authoritative for in-app navigation.
+  useEffect(() => {
+    const flushForPageExit = () => {
+      void flushPendingSegmentSaves({ keepalive: true });
+    };
+    const flushWhenHidden = () => {
+      if (document.visibilityState === "hidden") flushForPageExit();
+    };
+    window.addEventListener("pagehide", flushForPageExit);
+    document.addEventListener("visibilitychange", flushWhenHidden);
+    return () => {
+      window.removeEventListener("pagehide", flushForPageExit);
+      document.removeEventListener("visibilitychange", flushWhenHidden);
+    };
+  }, [flushPendingSegmentSaves]);
 
   // ── Structure actions ─────────────────────────────────────────────────
 

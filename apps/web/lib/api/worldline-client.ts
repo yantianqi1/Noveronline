@@ -93,6 +93,36 @@ function unwrapItems<T>(data: { items?: T[] } | T[] | null | undefined): T[] {
   return data?.items ?? [];
 }
 
+type WorldlinePagePayload<T> = {
+  items?: T[];
+  has_more?: boolean;
+  next_offset?: number;
+};
+
+const WORLDLINE_PAGE_SIZE = 100;
+
+async function fetchWorldlinePages<T>(path: string, tenantId: string): Promise<T[]> {
+  const items: T[] = [];
+  let offset = 0;
+  for (;;) {
+    const separator = path.includes("?") ? "&" : "?";
+    const data = await getJson<WorldlinePagePayload<T> | T[]>(
+      `${path}${separator}limit=${WORLDLINE_PAGE_SIZE}&offset=${offset}`,
+      tenantId,
+    );
+    const page = unwrapItems(data);
+    items.push(...page);
+    if (Array.isArray(data) || data.has_more !== true || page.length === 0) {
+      return items;
+    }
+    const nextOffset = data.next_offset ?? offset + page.length;
+    if (!Number.isInteger(nextOffset) || nextOffset <= offset) {
+      throw new WorldlineError("世界线分页游标无效，请重试。", "INVALID_PAGE_CURSOR");
+    }
+    offset = nextOffset;
+  }
+}
+
 // ── Sessions ───────────────────────────────────────────────────────────────
 
 export async function fetchWorldlineSessions(
@@ -186,11 +216,10 @@ export async function fetchWorldlineTimeline(
   tenantId: string,
   sessionId: string,
 ): Promise<WorldlineTimelineEvent[]> {
-  const data = await getJson<{ items?: WorldlineTimelineEvent[] } | WorldlineTimelineEvent[]>(
+  return fetchWorldlinePages(
     `/api/projects/${projectId}/worldline-sessions/${encodeURIComponent(sessionId)}/timeline`,
     tenantId,
   );
-  return unwrapItems(data);
 }
 
 export async function fetchWorldlineEvents(
@@ -200,11 +229,10 @@ export async function fetchWorldlineEvents(
   status?: string,
 ): Promise<WorldlineEvent[]> {
   const query = status ? `?status=${encodeURIComponent(status)}` : "";
-  const data = await getJson<{ items?: WorldlineEvent[] } | WorldlineEvent[]>(
+  return fetchWorldlinePages(
     `/api/projects/${projectId}/worldline-sessions/${encodeURIComponent(sessionId)}/events${query}`,
     tenantId,
   );
-  return unwrapItems(data);
 }
 
 /** Advance the world one step (manual) or in director mode. */

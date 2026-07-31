@@ -9,7 +9,7 @@ set -eu
 : "${APP_DATABASE_PASSWORD:?APP_DATABASE_PASSWORD is required}"
 
 export PGPASSWORD="$POSTGRES_PASSWORD"
-psql -v ON_ERROR_STOP=1 -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<'SQL' >/dev/null
+psql -v ON_ERROR_STOP=1 -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<SQL >/dev/null
 CREATE TABLE IF NOT EXISTS mirofish_schema_migrations (
   version TEXT PRIMARY KEY,
   checksum TEXT NOT NULL CHECK (checksum ~ '^[0-9a-f]{64}$'),
@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS mirofish_schema_migrations (
   execution_kind TEXT NOT NULL CHECK (execution_kind IN ('applied', 'baselined'))
 );
 REVOKE ALL ON mirofish_schema_migrations FROM PUBLIC;
+GRANT SELECT ON mirofish_schema_migrations TO "$APP_DATABASE_USER";
 SQL
 
 migration_marker_present() {
@@ -348,14 +349,26 @@ migration_marker_present() {
 	    0028_*) marker="
 	      to_regclass('public.idx_worldline_variables_session_locked') IS NOT NULL" ;;
 	    0029_*) marker="
-	      EXISTS (
-	        SELECT 1 FROM pg_trigger
-	        WHERE tgname = 'trg_assets_search_index_sync' AND NOT tgisinternal
-	      )
-	      AND EXISTS (
-	        SELECT 1 FROM pg_trigger
-	        WHERE tgname = 'trg_assets_search_index_cleanup' AND NOT tgisinternal
-	      )" ;;
+      EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'trg_assets_search_index_sync' AND NOT tgisinternal
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'trg_assets_search_index_cleanup' AND NOT tgisinternal
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM assets AS asset
+        LEFT JOIN global_search_index AS index_row
+          ON index_row.tenant_id = asset.tenant_id
+         AND index_row.project_id = asset.project_id
+         AND index_row.source = 'asset'
+         AND index_row.source_ref = asset.asset_id::text
+        WHERE asset.scope = 'project'
+          AND asset.project_id IS NOT NULL
+          AND index_row.source_ref IS NULL
+      )" ;;
 	    0030_*) marker="
 	      has_table_privilege('mirofish_app', 'public.writer_thread_messages', 'UPDATE')
 	      AND NOT has_table_privilege('mirofish_app', 'public.writer_thread_messages', 'DELETE')" ;;

@@ -18,6 +18,7 @@ export function UserMenu({ currentUser }: { currentUser: CurrentUser }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -41,14 +42,14 @@ export function UserMenu({ currentUser }: { currentUser: CurrentUser }) {
   async function handleSignOut() {
     if (signingOut) return;
     setSigningOut(true);
+    setSignOutError(null);
     try {
       await logout();
-    } catch {
-      // Even if the upstream call fails, send the user back to login — the
-      // cookie will be re-validated there. We never leave a half-state.
-    } finally {
       router.push("/login");
       router.refresh();
+    } catch (error) {
+      setSignOutError(error instanceof Error ? error.message : "退出登录失败，请重试。");
+      setSigningOut(false);
     }
   }
 
@@ -95,6 +96,11 @@ export function UserMenu({ currentUser }: { currentUser: CurrentUser }) {
               </span>
             </div>
             <div className="p-1.5">
+              {signOutError ? (
+                <p role="alert" className="px-2.5 pb-2 text-caption text-accent">
+                  {signOutError}
+                </p>
+              ) : null}
               <button
                 type="button"
                 role="menuitem"

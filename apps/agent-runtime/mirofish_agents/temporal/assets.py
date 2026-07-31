@@ -10,8 +10,10 @@ from typing import Any, Callable, Protocol
 from urllib.request import Request, urlopen
 
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
 
 from mirofish_agents.common.context import AgentContext
+from mirofish_agents.common.http import read_response_limited, response_limit_from_env
 from mirofish_agents.llm_quota import PostgresQuotaStore, ProviderQuotaGate, QuotaAwareJSONChatClient
 from mirofish_agents.seed.sequential_reader import (
     CredentialProvider,
@@ -22,9 +24,16 @@ from mirofish_agents.seed.sequential_reader import (
     PostgresCredentialProvider,
     PostgresModuleBindingResolver,
     set_postgres_tenant_context,
+    _estimate_tokens,
 )
 
 ASSET_TASK_QUEUE = "asset-light"
+ASSET_ACTIVITY_RETRY_POLICY = RetryPolicy(
+    initial_interval=timedelta(seconds=5),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(minutes=1),
+    maximum_attempts=3,
+)
 ASSET_INGESTION_MODULE_KEY = "asset_ingestion"
 STYLE_EXTRACTION_MODULE_KEY = "style_extractor"
 ASSET_REINDEX_MODULE_KEY = "asset_reindex"
@@ -648,30 +657,35 @@ class PostgresAssetReindexer:
             embedding_texts = [asset["embedding_text"] for asset in embedding_assets]
             manuscript_texts = [block["embedding_text"] for block in manuscript_blocks]
             all_texts = embedding_texts + manuscript_texts
-            if all_texts and self._quota_gate is not None:
-                all_vectors = self._quota_gate.execute_embedding(
-                    context=context,
-                    resolution=resolution,
-                    stage="reindex_embedding",
-                    call_index=0,
-                    input_texts=all_texts,
-                    provider=lambda provider_call_id: _embedding_provider_payload(
-                        self._embedding_client,
+            all_vectors: list[list[float]] = []
+            for call_index, batch in enumerate(_reindex_embedding_batches(all_texts, resolution.settings)):
+                if self._quota_gate is not None:
+                    batch_vectors = self._quota_gate.execute_embedding(
+                        context=context,
+                        resolution=resolution,
+                        stage="reindex_embedding",
+                        call_index=call_index,
+                        input_texts=batch,
+                        provider=lambda provider_call_id, batch=batch: _embedding_provider_payload(
+                            self._embedding_client,
+                            context=context,
+                            resolution=resolution,
+                            api_key=api_key,
+                            texts=batch,
+                            provider_call_id=provider_call_id,
+                        ),
+                        validate=lambda response, expected_count=len(batch): _quota_embedding_vectors(
+                            response, expected_count=expected_count
+                        ),
+                    )
+                else:
+                    batch_vectors = self._embedding_client.embed_texts(
                         context=context,
                         resolution=resolution,
                         api_key=api_key,
-                        texts=all_texts,
-                        provider_call_id=provider_call_id,
-                    ),
-                    validate=lambda response: _quota_embedding_vectors(response, expected_count=len(all_texts)),
-                )
-            else:
-                all_vectors = self._embedding_client.embed_texts(
-                    context=context,
-                    resolution=resolution,
-                    api_key=api_key,
-                    texts=all_texts,
-                ) if all_texts else []
+                        texts=batch,
+                    )
+                all_vectors.extend(batch_vectors)
             embeddings = all_vectors[: len(embedding_texts)]
             manuscript_embeddings = all_vectors[len(embedding_texts):]
         reindex_batch_id = f"asset-reindex:{context.run_id}"
@@ -1813,6 +1827,33 @@ def _embedding_provider_payload(
     }
 
 
+def _reindex_embedding_batches(texts: list[str], settings: dict[str, Any]) -> list[list[str]]:
+    """Keep provider requests bounded while preserving corpus order."""
+    max_tokens = _positive_reindex_setting(settings, "embedding_batch_max_tokens", 8192)
+    max_items = _positive_reindex_setting(settings, "embedding_batch_size", 64)
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_tokens = 0
+    for text in texts:
+        text_tokens = max(1, _estimate_tokens(text))
+        if current and (len(current) >= max_items or current_tokens + text_tokens > max_tokens):
+            batches.append(current)
+            current = []
+            current_tokens = 0
+        current.append(text)
+        current_tokens += text_tokens
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _positive_reindex_setting(settings: dict[str, Any], key: str, default: int) -> int:
+    value = settings.get(key)
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return min(value, 4096 if key == "embedding_batch_size" else 262_144)
+    return default
+
+
 def _quota_embedding_vectors(response: dict[str, Any], *, expected_count: int) -> list[list[float]]:
     raw_vectors = response.get("vectors")
     if not isinstance(raw_vectors, list) or len(raw_vectors) != expected_count:
@@ -1836,7 +1877,10 @@ def _embeddings_url(base_url: str) -> str:
 
 def _urlopen_bytes(request: Request) -> bytes:
     with urlopen(request) as response:  # noqa: S310 - URL comes from an authorized LLM Facility channel
-        return response.read()
+        return read_response_limited(
+            response,
+            max_bytes=response_limit_from_env("MIROFISH_LLM_MAX_RESPONSE_BYTES", 16 * 1024 * 1024),
+        )
 
 
 def _rollback_quietly(connection: Any) -> None:
@@ -2325,6 +2369,7 @@ class AssetIngestionWorkflow:
             asset_ingestion_activity,
             payload,
             start_to_close_timeout=timedelta(minutes=20),
+            retry_policy=ASSET_ACTIVITY_RETRY_POLICY,
         )
 
 
@@ -2336,6 +2381,7 @@ class StyleExtractionWorkflow:
             style_extraction_activity,
             payload,
             start_to_close_timeout=timedelta(minutes=20),
+            retry_policy=ASSET_ACTIVITY_RETRY_POLICY,
         )
 
 
@@ -2347,6 +2393,7 @@ class AssetReindexWorkflow:
             asset_reindex_activity,
             payload,
             start_to_close_timeout=timedelta(minutes=20),
+            retry_policy=ASSET_ACTIVITY_RETRY_POLICY,
         )
 
 

@@ -596,6 +596,13 @@ function composerWorldlineTimeline(request: ComposeDraftRequest): Record<string,
     worldline_timeline: {
       guidance:
         "Plot timeline from the author's worldline simulation (adopted events, in step order). Reference, not immutable canon — but write the prose ALONG this sequence: realise each step in turn, do not reorder or skip unless the instruction explicitly says so.",
+      truncated_sessions: request.worldline_timelines
+        .filter((timeline) => timeline.truncated)
+        .map((timeline) => ({
+          session_id: timeline.session_id,
+          total_event_count: timeline.total_event_count,
+          returned_event_count: timeline.events.length
+        })),
       events: request.worldline_timelines
         .flatMap((timeline) => timeline.events)
         .sort((a, b) => a.step - b.step)
