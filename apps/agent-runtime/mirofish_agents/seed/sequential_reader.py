@@ -312,6 +312,7 @@ class LLMFacilitySequentialReader:
         module_key: str,
         segments: list[dict[str, Any]],
         progress_callback: Callable[..., None] | None = None,
+        cancellation_check: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         if module_key != "sequential_reading":
             return _failed("VALIDATION_FAILED", "LLMFacilitySequentialReader only supports sequential_reading")
@@ -338,6 +339,11 @@ class LLMFacilitySequentialReader:
             completed_segments = 0
             notes: list[Any] = []
             for batch_index, batch in enumerate(batches):
+                if cancellation_check is not None and cancellation_check():
+                    # Abort cleanly at a batch boundary when the activity was
+                    # cancelled; never keep reading (or writing progress events)
+                    # for a dead execution.
+                    return _failed("ACTIVITY_CANCELLED", "sequential reading was cancelled")
                 _emit_sequential_progress(
                     progress_callback,
                     phase="batch_start",
@@ -356,6 +362,7 @@ class LLMFacilitySequentialReader:
                         batch=batch,
                         segment_text_store=self._segment_text_store,
                         progress_callback=progress_callback,
+                        cancellation_check=cancellation_check,
                         batch_index=batch_index,
                         batch_count=len(batches),
                         completed_segments=completed_segments,
@@ -466,9 +473,12 @@ def _read_batch_with_recovery(
     batch_count: int,
     completed_segments: int,
     total_segments: int,
+    cancellation_check: Callable[[], bool] | None = None,
     attempt: int = 0,
 ) -> list[Any]:
     """Read one batch; on JSON/provider flakiness retry once, then split the batch."""
+    if cancellation_check is not None and cancellation_check():
+        raise LLMFacilityError("ACTIVITY_CANCELLED", "sequential reading was cancelled")
     try:
         messages = _sequential_reading_messages(
             context=context,
@@ -512,6 +522,7 @@ def _read_batch_with_recovery(
                 batch=batch,
                 segment_text_store=segment_text_store,
                 progress_callback=progress_callback,
+                cancellation_check=cancellation_check,
                 batch_index=batch_index,
                 batch_count=batch_count,
                 completed_segments=completed_segments,
@@ -542,6 +553,7 @@ def _read_batch_with_recovery(
                 batch=left,
                 segment_text_store=segment_text_store,
                 progress_callback=progress_callback,
+                cancellation_check=cancellation_check,
                 batch_index=batch_index,
                 batch_count=batch_count,
                 completed_segments=completed_segments,
@@ -556,6 +568,7 @@ def _read_batch_with_recovery(
                 batch=right,
                 segment_text_store=segment_text_store,
                 progress_callback=progress_callback,
+                cancellation_check=cancellation_check,
                 batch_index=batch_index,
                 batch_count=batch_count,
                 completed_segments=completed_segments + len(left),

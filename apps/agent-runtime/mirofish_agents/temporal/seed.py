@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import re
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -13,7 +14,7 @@ from typing import Any, Callable, Protocol
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from temporalio import activity, workflow
+from temporalio import activity, exceptions, workflow
 from temporalio.common import RetryPolicy
 
 from mirofish_agents.common.context import AgentContext
@@ -40,6 +41,12 @@ SEED_ACTIVITY_RETRY_POLICY = RetryPolicy(
     maximum_interval=timedelta(minutes=1),
     maximum_attempts=3,
 )
+# Sequential reading streams every segment of the novel through the provider;
+# token-batched calls routinely take minutes each (slow providers can exceed
+# ten minutes on a big batch) and large novels need many batches. Liveness is
+# enforced by the 2-minute heartbeat timeout via the activity heartbeat
+# watchdog (every 30s), so the start-to-close budget is deliberately generous.
+SEQUENTIAL_READING_START_TO_CLOSE_TIMEOUT = timedelta(hours=12)
 SENSITIVE_WORKFLOW_EVENT_KEYS = {
     "api_key",
     "artifact_object_key",
@@ -8605,6 +8612,36 @@ def segment_text_activity(
     }
 
 
+def _sequential_reading_heartbeat_watchdog(
+    stop_event: threading.Event,
+    state: dict[str, Any],
+) -> None:
+    """Keep a sequential read alive during long provider calls.
+
+    The reader only heartbeats between batches, but a single token-batched
+    provider call can take far longer than the activity heartbeat timeout
+    (2 minutes). This daemon heartbeats every 30s for the whole read and exits
+    on cancellation — ``activity.is_cancelled()`` is set synchronously even
+    when the injected CancelledError is delayed behind a blocking call, so it
+    is the reliable signal. Never raises.
+    """
+    while not stop_event.is_set():
+        try:
+            if activity.is_cancelled():
+                return
+            activity.heartbeat(
+                state.get("phase", "reading"),
+                state.get("completed_segments", 0),
+            )
+        except RuntimeError:
+            # Not running inside an activity context (local/test execution).
+            return
+        except BaseException:
+            # Activity cancelled or worker shutting down.
+            return
+        stop_event.wait(timeout=30)
+
+
 @activity.defn
 def sequential_reading_activity(
     payload: dict[str, Any],
@@ -8705,10 +8742,27 @@ def sequential_reading_activity(
     def _on_sequential_progress(progress_payload: dict[str, Any]) -> None:
         if not isinstance(progress_payload, dict):
             return
+        cancelled = False
         try:
-            activity.heartbeat(progress_payload.get("phase", "reading"), progress_payload.get("completed_segments", 0))
+            cancelled = activity.is_cancelled()
+        except RuntimeError:
+            cancelled = False
+        phase = progress_payload.get("phase", "reading")
+        completed = progress_payload.get("completed_segments", 0)
+        watchdog_state["phase"] = phase
+        watchdog_state["completed_segments"] = completed
+        if cancelled:
+            # Cancellation is pending (heartbeat timeout, operator cancel, or
+            # worker shutdown). Stop writing progress events so a killed
+            # execution can never paint a phantom "completed" trail; the
+            # reader aborts at the next batch boundary.
+            return
+        try:
+            activity.heartbeat(phase, completed)
         except RuntimeError:
             pass
+        except BaseException:
+            return
         public_payload = {
             key: value
             for key, value in progress_payload.items()
@@ -8737,6 +8791,12 @@ def sequential_reading_activity(
             workflow_event_writer=workflow_event_writer,
         )
 
+    def _sequential_reading_cancelled() -> bool:
+        try:
+            return activity.is_cancelled()
+        except RuntimeError:
+            return False
+
     read_segments_kwargs: dict[str, Any] = {
         "context": context,
         "module_key": "sequential_reading",
@@ -8748,8 +8808,23 @@ def sequential_reading_activity(
         signature = None
     if signature is not None and "progress_callback" in signature.parameters:
         read_segments_kwargs["progress_callback"] = _on_sequential_progress
+    if signature is not None and "cancellation_check" in signature.parameters:
+        read_segments_kwargs["cancellation_check"] = _sequential_reading_cancelled
+    watchdog_stop = threading.Event()
+    watchdog_state: dict[str, Any] = {"phase": "reading", "completed_segments": 0}
+    watchdog = threading.Thread(
+        target=_sequential_reading_heartbeat_watchdog,
+        args=(watchdog_stop, watchdog_state),
+        name="sequential-reading-heartbeat",
+        daemon=True,
+    )
+    watchdog.start()
     try:
         reading_result = reader.read_segments(**read_segments_kwargs)
+    except exceptions.CancelledError:
+        # The SDK injected the cancellation into this thread; let Temporal
+        # record it instead of converting it into a failed result.
+        raise
     except Exception as exc:
         return _sequential_reading_failed_result(
             base=base,
@@ -8761,10 +8836,19 @@ def sequential_reading_activity(
             workflow_event_writer=workflow_event_writer,
             workflow_status_writer=workflow_status_writer,
         )
+    finally:
+        watchdog_stop.set()
+        watchdog.join(timeout=5)
     if reading_result.get("status") != "completed":
         error = reading_result.get("error") if isinstance(reading_result.get("error"), dict) else {}
         code = error.get("code") if isinstance(error.get("code"), str) else "LLM_PROVIDER_ERROR"
         message = error.get("message") if isinstance(error.get("message"), str) else "sequential reading failed"
+        if code == "ACTIVITY_CANCELLED":
+            # Cancelled by the operator (or heartbeat kill): the API already
+            # marked the run cancelled; never overwrite it with a failed status
+            # or emit a misleading failed event. Re-raise so Temporal records
+            # the cancellation truthfully.
+            raise exceptions.CancelledError("sequential reading was cancelled")
         return _sequential_reading_failed_result(
             base=base,
             context=context,
@@ -10534,7 +10618,7 @@ class SeedPipelineWorkflow:
         sequential_result = await workflow.execute_activity(
             sequential_reading_activity,
             sequential_payload,
-            start_to_close_timeout=timedelta(minutes=30),
+            start_to_close_timeout=SEQUENTIAL_READING_START_TO_CLOSE_TIMEOUT,
             heartbeat_timeout=timedelta(minutes=2),
             retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )

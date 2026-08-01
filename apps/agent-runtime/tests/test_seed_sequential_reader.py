@@ -274,6 +274,121 @@ def test_llm_facility_sequential_reader_emits_batch_progress_callbacks() -> None
     assert "content" not in str(events)
 
 
+def test_llm_facility_sequential_reader_aborts_between_batches_when_cancelled() -> None:
+    base = _resolution()
+    resolution = ModuleBindingResolution(
+        tenant_id=base.tenant_id,
+        project_id=base.project_id,
+        module_key=base.module_key,
+        channel_id=base.channel_id,
+        model_id=base.model_id,
+        provider=base.provider,
+        base_url=base.base_url,
+        credential_ref=base.credential_ref,
+        supports_json=base.supports_json,
+        settings={"temperature": 0.1, "max_tokens": 1200, "batch_max_segments": 1},
+    )
+    store = InMemoryObjectStore(
+        {
+            "segments/0000.txt": "第一章 雨夜".encode("utf-8"),
+            "segments/0001.txt": "第二章 晨光".encode("utf-8"),
+        }
+    )
+
+    class MatchingNotesClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def complete_json(self, **kwargs: Any) -> dict[str, Any]:
+            payload = json.loads(kwargs["messages"][1]["content"])
+            segment_id = payload["segments"][0]["segment_id"]
+            self.calls.append(segment_id)
+            return {
+                "notes": [
+                    {
+                        "segment_id": segment_id,
+                        "summary": f"note-{segment_id}",
+                        "payload_jsonb": {
+                            "characters": [],
+                            "organizations": [],
+                            "relationships": [],
+                            "plot_threads": [],
+                            "world_rules": [],
+                            "events": [],
+                            "consistency_notes": [],
+                        },
+                    }
+                ]
+            }
+
+    chat_client = MatchingNotesClient()
+    reader = LLMFacilitySequentialReader(
+        binding_resolver=RecordingBindingResolver(resolution),
+        credential_provider=RecordingCredentialProvider(api_key="sk-real"),
+        chat_client=chat_client,
+        segment_text_store=store,
+    )
+    remaining = {"value": 2}
+
+    def cancellation_check() -> bool:
+        # Called at the batch-loop boundary and again at the recovery entry for
+        # the same batch; allow the first batch through, cancel before the second.
+        if remaining["value"] > 0:
+            remaining["value"] -= 1
+            return False
+        return True
+
+    result = reader.read_segments(
+        context=_context(),
+        module_key="sequential_reading",
+        segments=[
+            {"segment_id": "segment-1", "segment_order": 0, "object_key": "segments/0000.txt"},
+            {"segment_id": "segment-2", "segment_order": 1, "object_key": "segments/0001.txt"},
+        ],
+        cancellation_check=cancellation_check,
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "ACTIVITY_CANCELLED"
+    # The first batch was read; the second batch aborted before any provider call.
+    assert chat_client.calls == ["segment-1"]
+
+
+def test_llm_facility_sequential_reader_aborts_before_any_batch_when_cancelled() -> None:
+    base = _resolution()
+    resolution = ModuleBindingResolution(
+        tenant_id=base.tenant_id,
+        project_id=base.project_id,
+        module_key=base.module_key,
+        channel_id=base.channel_id,
+        model_id=base.model_id,
+        provider=base.provider,
+        base_url=base.base_url,
+        credential_ref=base.credential_ref,
+        supports_json=base.supports_json,
+        settings={"temperature": 0.1, "max_tokens": 1200, "batch_max_segments": 1},
+    )
+    store = InMemoryObjectStore({"segments/0000.txt": "第一章 雨夜".encode("utf-8")})
+    chat_client = RecordingJSONChatClient(response_json={"notes": []})
+    reader = LLMFacilitySequentialReader(
+        binding_resolver=RecordingBindingResolver(resolution),
+        credential_provider=RecordingCredentialProvider(api_key="sk-real"),
+        chat_client=chat_client,
+        segment_text_store=store,
+    )
+
+    result = reader.read_segments(
+        context=_context(),
+        module_key="sequential_reading",
+        segments=[{"segment_id": "segment-1", "segment_order": 0, "object_key": "segments/0000.txt"}],
+        cancellation_check=lambda: True,
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "ACTIVITY_CANCELLED"
+    assert chat_client.calls == []
+
+
 def test_llm_facility_sequential_reader_fails_closed_when_module_is_unbound() -> None:
     resolver = RecordingBindingResolver(LLMFacilityError("LLM_MODULE_UNBOUND", "sequential_reading module is not bound"))
     credentials = RecordingCredentialProvider(api_key="sk-real")
