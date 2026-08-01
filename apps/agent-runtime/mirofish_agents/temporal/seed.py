@@ -47,6 +47,15 @@ SEED_ACTIVITY_RETRY_POLICY = RetryPolicy(
 # enforced by the 2-minute heartbeat timeout via the activity heartbeat
 # watchdog (every 30s), so the start-to-close budget is deliberately generous.
 SEQUENTIAL_READING_START_TO_CLOSE_TIMEOUT = timedelta(hours=12)
+# Other LLM-backed seed stages (global aggregation, ontology, entity
+# resolution, agent profiles, archive candidates, segment re-reads) make
+# provider calls that can legitimately run for many minutes on large novels.
+# The provider HTTP cap is 600s per call, and in-stage recovery may retry, so
+# the budget must comfortably exceed a single slow call plus its retries.
+SEED_LLM_STAGE_START_TO_CLOSE_TIMEOUT = timedelta(hours=4)
+# Parse / DB-only stages: OCR and large writes get slack, but no provider call
+# is in flight, so minutes are enough.
+SEED_DB_STAGE_START_TO_CLOSE_TIMEOUT = timedelta(minutes=30)
 SENSITIVE_WORKFLOW_EVENT_KEYS = {
     "api_key",
     "artifact_object_key",
@@ -10570,7 +10579,7 @@ class SeedSegmentRetryWorkflow:
         return await workflow.execute_activity(
             seed_segment_retry_activity,
             payload,
-            start_to_close_timeout=timedelta(minutes=10),
+            start_to_close_timeout=SEED_LLM_STAGE_START_TO_CLOSE_TIMEOUT,
             retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
 
@@ -10584,7 +10593,7 @@ class SeedPipelineWorkflow:
             return await workflow.execute_activity(
                 finalize_seed_activity,
                 payload,
-                start_to_close_timeout=timedelta(minutes=10),
+                start_to_close_timeout=SEED_DB_STAGE_START_TO_CLOSE_TIMEOUT,
                 retry_policy=SEED_ACTIVITY_RETRY_POLICY,
             )
         if retry_from_stage == "sequential_reading":
@@ -10601,7 +10610,7 @@ class SeedPipelineWorkflow:
             parse_result = await workflow.execute_activity(
                 parse_file_activity,
                 payload,
-                start_to_close_timeout=timedelta(minutes=10),
+                start_to_close_timeout=SEED_DB_STAGE_START_TO_CLOSE_TIMEOUT,
                 retry_policy=SEED_ACTIVITY_RETRY_POLICY,
             )
             if parse_result.get("status") != "completed":
@@ -10609,7 +10618,7 @@ class SeedPipelineWorkflow:
             segment_result = await workflow.execute_activity(
                 segment_text_activity,
                 _segment_payload_from_parse(payload, parse_result),
-                start_to_close_timeout=timedelta(minutes=10),
+                start_to_close_timeout=SEED_DB_STAGE_START_TO_CLOSE_TIMEOUT,
                 retry_policy=SEED_ACTIVITY_RETRY_POLICY,
             )
             if segment_result.get("status") != "completed":
@@ -10627,7 +10636,7 @@ class SeedPipelineWorkflow:
         runtime_facts_result = await workflow.execute_activity(
             persist_runtime_facts_activity,
             _runtime_facts_payload_from_sequential(payload),
-            start_to_close_timeout=timedelta(minutes=10),
+            start_to_close_timeout=SEED_DB_STAGE_START_TO_CLOSE_TIMEOUT,
             retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
         if runtime_facts_result.get("status") != "completed":
@@ -10635,7 +10644,7 @@ class SeedPipelineWorkflow:
         global_aggregation_result = await workflow.execute_activity(
             global_aggregation_activity,
             _global_aggregation_payload_from_runtime_facts(payload, runtime_facts_result),
-            start_to_close_timeout=timedelta(minutes=20),
+            start_to_close_timeout=SEED_LLM_STAGE_START_TO_CLOSE_TIMEOUT,
             retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
         if global_aggregation_result.get("status") != "completed":
@@ -10643,7 +10652,7 @@ class SeedPipelineWorkflow:
         ontology_result = await workflow.execute_activity(
             ontology_activity,
             _ontology_payload_from_global_aggregation(payload, global_aggregation_result),
-            start_to_close_timeout=timedelta(minutes=20),
+            start_to_close_timeout=SEED_LLM_STAGE_START_TO_CLOSE_TIMEOUT,
             retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
         if ontology_result.get("status") != "completed":
@@ -10651,7 +10660,7 @@ class SeedPipelineWorkflow:
         entity_resolution_result = await workflow.execute_activity(
             entity_resolution_activity,
             _entity_resolution_payload_from_ontology(payload, ontology_result),
-            start_to_close_timeout=timedelta(minutes=20),
+            start_to_close_timeout=SEED_LLM_STAGE_START_TO_CLOSE_TIMEOUT,
             retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
         if entity_resolution_result.get("status") != "completed":
@@ -10659,7 +10668,7 @@ class SeedPipelineWorkflow:
         agent_profile_result = await workflow.execute_activity(
             agent_profile_activity,
             _agent_profile_payload_from_entity_resolution(payload, entity_resolution_result),
-            start_to_close_timeout=timedelta(minutes=20),
+            start_to_close_timeout=SEED_LLM_STAGE_START_TO_CLOSE_TIMEOUT,
             retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
         if agent_profile_result.get("status") != "completed":
@@ -10667,7 +10676,7 @@ class SeedPipelineWorkflow:
         archive_candidate_result = await workflow.execute_activity(
             archive_candidate_activity,
             _archive_candidate_payload_from_agent_profile(payload, agent_profile_result),
-            start_to_close_timeout=timedelta(minutes=20),
+            start_to_close_timeout=SEED_LLM_STAGE_START_TO_CLOSE_TIMEOUT,
             retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
         if archive_candidate_result.get("status") != "completed":
@@ -10675,7 +10684,7 @@ class SeedPipelineWorkflow:
         index_assets_result = await workflow.execute_activity(
             index_assets_activity,
             _index_assets_payload_from_archive_candidate(payload, archive_candidate_result),
-            start_to_close_timeout=timedelta(minutes=20),
+            start_to_close_timeout=SEED_DB_STAGE_START_TO_CLOSE_TIMEOUT,
             retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
         if index_assets_result.get("status") != "completed":
@@ -10683,7 +10692,7 @@ class SeedPipelineWorkflow:
         return await workflow.execute_activity(
             finalize_seed_activity,
             _finalize_payload_from_index_assets(payload, index_assets_result),
-            start_to_close_timeout=timedelta(minutes=10),
+            start_to_close_timeout=SEED_DB_STAGE_START_TO_CLOSE_TIMEOUT,
             retry_policy=SEED_ACTIVITY_RETRY_POLICY,
         )
 

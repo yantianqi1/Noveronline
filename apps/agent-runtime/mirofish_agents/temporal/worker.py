@@ -51,6 +51,7 @@ from mirofish_agents.temporal.seed import (
     segment_text_activity,
     sequential_reading_activity,
 )
+from mirofish_agents.temporal.seed_workflow_monitor import SeedWorkflowStatusMonitor
 from mirofish_agents.temporal.worldline import (
     WORLDLINE_TASK_QUEUE,
     WorldlinePrepareWorkflow,
@@ -134,6 +135,11 @@ async def run_worker() -> None:
     client = await Client.connect(temporal_address, namespace=temporal_namespace)
     task_queue = os.environ.get("AGENT_RUNTIME_TASK_QUEUE", HELLO_AGENT_TASK_QUEUE)
     components = worker_components_for_task_queue(task_queue)
+    status_monitor = None
+    if task_queue == SEED_TASK_QUEUE:
+        # Only the seed-heavy worker reconciles run rows; other workers must not
+        # race it. Idempotent updates make a second seed instance harmless.
+        status_monitor = SeedWorkflowStatusMonitor.from_env(client=client)
     with ThreadPoolExecutor(max_workers=32) as activity_executor:
         worker = Worker(
             client,
@@ -142,7 +148,18 @@ async def run_worker() -> None:
             activities=components["activities"],
             activity_executor=activity_executor,
         )
-        await worker.run()
+        if status_monitor is None:
+            await worker.run()
+            return
+        monitor_task = asyncio.create_task(status_monitor.run_forever())
+        try:
+            await worker.run()
+        finally:
+            monitor_task.cancel()
+            try:
+                await monitor_task
+            except asyncio.CancelledError:
+                pass
 
 
 def main() -> None:
