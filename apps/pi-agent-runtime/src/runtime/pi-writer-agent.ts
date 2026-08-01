@@ -25,6 +25,7 @@ import type {
   WriterToolName
 } from "../activities/pi-writer-activities.js";
 import { assertToolAllowed, ToolPermissionDenied } from "../tools/permissions.js";
+import { versionWriterPrompt } from "./prompt-registry.js";
 
 const noArguments = ObjectSchema({}, { additionalProperties: false });
 
@@ -225,7 +226,7 @@ export function createPiWriterExecution() {
 const RETRIEVAL_QUERY_CHANNELS = new Set(["keyed", "hybrid", "graph", "manuscript"]);
 
 function retrievalPlannerSystemPrompt(): string {
-  return [
+  return versionWriterPrompt("retrieval_planner", [
     "You are the MiroFish writer retrieval planner. Before any prose is written, decide what canon the writer must recall to keep a long novel consistent.",
     "Respond with ONLY a JSON object — no prose, no markdown fence — of the form:",
     '{"intent": "<continue_scene | rewrite_span | payoff_foreshadow | new_scene | ...>",',
@@ -233,7 +234,7 @@ function retrievalPlannerSystemPrompt(): string {
     ' "queries": [{"channel": "hybrid|keyed|graph|manuscript", "text": "<retrieval intent in the novel\'s language>", "asset_types": ["..."], "top_k": 8}],',
     ' "budget": {"max_context_tokens": 24000}}',
     "Rules: 2-5 queries. Use channel hybrid for settings/rules/relationships, keyed for proper names (characters, places, techniques), manuscript for prior scenes, graph for relationships. Write query text in the novel's own language (Chinese for Chinese novels). Never invent canon."
-  ].join(" ");
+  ].join(" "));
 }
 
 function retrievalPlannerPrompt(request: PlanRetrievalRequest): string {
@@ -309,12 +310,12 @@ function positiveInt(value: unknown): number | undefined {
 // ── Cross-encoder rerank (P2, doc 41 §4.6) ───────────────────────────────
 
 function rerankSystemPrompt(): string {
-  return [
+  return versionWriterPrompt("rerank", [
     "You are the MiroFish writer retrieval reranker. Given a writing intent and a list of recalled canon/prose candidates, order them by how useful each is for writing the passage consistently.",
     "Respond with ONLY a JSON object — no prose, no markdown — of the form:",
     '{"ranked_ids": ["<candidate id>", "..."], "kept": <number>}',
     "Rank most-useful first. Drop candidates that are irrelevant to the intent. Preserve every id exactly as given; never invent ids."
-  ].join(" ");
+  ].join(" "));
 }
 
 function rerankPrompt(request: RerankRecallRequest): string {
@@ -357,12 +358,12 @@ function parseRerankIds(content: string, candidates: RerankRecallRequest["candid
 // ── Consistency check (P2, doc 41 §4.7) ──────────────────────────────────
 
 function consistencySystemPrompt(): string {
-  return [
+  return versionWriterPrompt("consistency", [
     "You are the MiroFish writer consistency checker. Given a draft and the canon it must respect (world rules and character states), find contradictions — 'broken canon' (吃书).",
     "Respond with ONLY a JSON object — no prose, no markdown — of the form:",
     '{"violations": [{"canon_label": "<the canon fact>", "conflict": "<what the draft wrongly claims>", "severity": "minor|major"}]}',
     "Only report genuine contradictions, not stylistic choices or things canon is silent about. An empty violations array means the draft is consistent."
-  ].join(" ");
+  ].join(" "));
 }
 
 function consistencyPrompt(request: CheckConsistencyRequest): string {
@@ -425,7 +426,7 @@ function writerTool(name: WriterToolName, request: OrchestrateWritingBriefReques
     label: name,
     description: toolDescription(name),
     parameters,
-    executionMode: name === "save_draft_revision" ? "sequential" : "parallel",
+    executionMode: "parallel",
     execute: async (toolCallId, params, signal) => {
       if (signal?.aborted) throw new Error("writer tool execution aborted");
       const details = await request.executeTool(name, toolCallId, params as Record<string, unknown>);
@@ -503,7 +504,7 @@ function providerRequestHeaders(request: ComposeDraftRequest | OrchestrateWritin
 }
 
 function orchestratorSystemPrompt(): string {
-  return "You are the MiroFish writer orchestrator. Call the available read tools before producing a concise writing brief. Never write or adopt manuscript content. Do not call save_draft_revision; the runtime persists the composer result explicitly.";
+  return versionWriterPrompt("orchestrator", "You are the MiroFish writer orchestrator. Call the available read tools before producing a concise writing brief. Never write or adopt manuscript content. Draft persistence is owned by the runtime.");
 }
 
 function orchestratorPrompt(request: OrchestrateWritingBriefRequest): string {
@@ -570,9 +571,9 @@ function orchestratorPrompt(request: OrchestrateWritingBriefRequest): string {
 function composerSystemPrompt(request: ComposeDraftRequest): string {
   const configured = typeof request.settings.system_prompt === "string" ? request.settings.system_prompt.trim() : "";
   if (request.mode === "revise") {
-    return configured || "You revise selected novel prose. Respect every constant_canon constraint if provided. Return only the revised selection text. Do not wrap in quotes or commentary. Do not claim manuscript adoption.";
+    return versionWriterPrompt("composer", configured || "You revise selected novel prose. Respect every constant_canon constraint if provided. Return only the revised selection text. Do not wrap in quotes or commentary. Do not claim manuscript adoption.");
   }
-  return configured || "Write original novel prose from the supplied writing brief. Respect every constant_canon constraint if provided. Return prose only. Do not claim manuscript adoption or review completion.";
+  return versionWriterPrompt("composer", configured || "Write original novel prose from the supplied writing brief. Respect every constant_canon constraint if provided. Return prose only. Do not claim manuscript adoption or review completion.");
 }
 
 /** Constant-injection canon rides the composer prompt directly (doc 41 §4.2):
@@ -712,8 +713,7 @@ function toolDescription(name: WriterToolName): string {
     query_graph_neighbors: "Read explicitly selected story graph nodes and their direct relationships.",
     query_asset_relationships: "Bring out one recalled asset's 1-hop related assets (召回一个、带出一串) — its weapon, sect, allies, the relationship records themselves. Pass the recalled asset_id; returns related assets with relation_type and direction. Use after search_assets lands a character/setting whose connections matter for the passage.",
     query_worldline_paths: "Read explicitly selected saved worldline paths as non-canon references.",
-    query_manuscript_context: "Read recently adopted manuscript blocks for continuation context.",
-    save_draft_revision: "Reserved runtime persistence tool. The orchestrator must not call it."
+    query_manuscript_context: "Read recently adopted manuscript blocks for continuation context."
   };
   return descriptions[name];
 }

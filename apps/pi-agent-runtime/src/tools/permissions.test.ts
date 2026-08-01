@@ -10,7 +10,7 @@ const context: RuntimeContext = {
   trace_id: "trace_1",
   requested_by: "usr_1",
   permissions: {
-    tools: ["query_assets", "save_draft_revision"],
+    tools: ["query_assets"],
     can_write_draft: true
   }
 };

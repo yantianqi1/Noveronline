@@ -1,6 +1,6 @@
 # SaaS Current Development Progress
 
-更新时间：`2026-07-31`
+更新时间：`2026-08-01`
 
 ## 文档职责
 
@@ -33,6 +33,12 @@ Focused 证据：Go API full、Pi Runtime `138 passed, 4 skipped` + typecheck/bu
 本轮实现续项（2026-07-31）：生产/预发布 Redis 已改为密码认证并由 bootstrap 生成独立 secret，SMTP bootstrap 不再接受 localhost/未配置占位值；Recovery request/reset、邀请接受的 Web BFF 与真实 API 页面已补齐，登录回跳经过同源路径校验，登录页生产 build 的 `useSearchParams` Suspense 边界已补齐。控制面 signup 默认关闭并由 `MIROFISH_ENABLE_SELF_SIGNUP` 显式开启，Writer 客户端正确处理 204/205 空响应。Pi analysis/worldline-cast worker 已接入 PostgreSQL quota reservation/finalize/release 与 concurrency lease，失败路径释放资源，analysis 不再借用其他模块 donor binding；Python Temporal 的 reviewer/assets/worldline prepare 瞬时错误进入有界 retry，永久配置/权限/配额错误保持终态。
 
 本轮新增验证：Go `go test ./...`、Python `510 passed, 31 skipped`、Pi `138 passed, 4 skipped` + typecheck/build、Web `122 passed, 1 skipped` + typecheck/build、infra production ops `50 passed`、shell syntax 与 `git diff --check` 均通过。R2 仍保持 `in_progress`：邮箱验证、其余 workflow 同族 retry/idempotency、Worldline/collections 显式分页、移动 drawer focus trap 等边界未宣称完成；Recovery UI 已在本轮补齐。
+
+## 2026-08-01 project-audit 修复
+
+`docs/project-audit/` 的静态审查已按严重度完成本轮 P0–P2 修复：Pi Writer embedding 纳入统一 quota/lease/usage 生命周期；Web Writer 事件改用可恢复 SSE；移除未注册的 `save_draft_revision` 模型工具契约但保留 runtime-owned 草稿持久化；消费 consistency clean/skipped/degraded 状态；Temporal starter 本地缓存有界并清理终态；Writer system prompt 增加稳定 key/version。P3 的 Writer/Cast 工具命名空间和 `writer_approvals` producer/UI 仍保留为产品决策项，未伪造成功路径、删除表或改变 MAIN-100/R2 状态。
+
+本轮验证：Go `go test ./...`；Pi `npm run typecheck`、`npm test`（141 passed, 4 skipped）、`npm run build`；Web `npm run typecheck`、`npm test`（124 passed, 1 skipped）、`npm run build`；均通过。详细清单见 `docs/project-audit/13-fix-plan.md`。
 
 ## 2026-07-27 全模块缺陷审计收口
 

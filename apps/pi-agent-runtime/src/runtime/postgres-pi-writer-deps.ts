@@ -26,6 +26,9 @@ import type {
   SearchAssetsArgs,
   SearchAssetsMode,
   SearchManuscriptArgs,
+  QueryEmbeddingExecutor,
+  QueryEmbeddingRequest,
+  QueryEmbeddingResult,
   UpdateWriterRunStatusRequest
 } from "../activities/pi-writer-activities.js";
 import { effectiveModelCapabilities } from "../llm/model-capabilities.js";
@@ -81,7 +84,8 @@ export function createPostgresPiWriterDeps(options: PostgresPiWriterDepsOptions)
   const quota = createPostgresQuotaStore(options.db);
   return {
     resolveModuleBinding: async (request) => resolveModuleBinding(options.db, request),
-    executeWriterTool: async (request) => executeWriterTool(options, request),
+    executeWriterTool: async (request, queryEmbeddingExecutor) => executeWriterTool(options, request, queryEmbeddingExecutor),
+    executeQueryEmbedding: async (request) => executeQueryEmbedding(options, request),
     loadConsistencyCanon: async (request) => loadConsistencyCanon(options, request),
     loadAlwaysOnAssets: async (request) => loadAlwaysOnAssets(options, request),
     loadWorldlineTimeline: async (request) => loadWorldlineTimeline(options, request),
@@ -301,13 +305,17 @@ async function resolveModuleBinding(db: QueryExecutor, request: ResolveModuleBin
   };
 }
 
-async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: ExecuteWriterToolRequest): Promise<Record<string, unknown>> {
+async function executeWriterTool(
+  options: PostgresPiWriterDepsOptions,
+  request: ExecuteWriterToolRequest,
+  queryEmbeddingExecutor?: QueryEmbeddingExecutor
+): Promise<Record<string, unknown>> {
   const db = options.db;
   switch (request.tool_name) {
     case "search_assets":
-      return executeSearchAssets(options, request);
+      return executeSearchAssets(options, request, queryEmbeddingExecutor);
     case "search_manuscript":
-      return executeSearchManuscript(options, request);
+      return executeSearchManuscript(options, request, queryEmbeddingExecutor);
     case "fuse_recall":
       return executeFuseRecall(request);
     case "query_project_context": {
@@ -594,8 +602,6 @@ async function executeWriterTool(options: PostgresPiWriterDepsOptions, request: 
     case "query_manuscript_context": {
       return queryManuscriptContext(db, request);
     }
-    case "save_draft_revision":
-      throw new Error("TOOL_PERMISSION_DENIED: draft persistence is runtime-owned");
   }
 }
 
@@ -748,7 +754,7 @@ async function resolveCurrentChapterOrder(
   return Number.isInteger(order) && order >= 0 ? order : null;
 }
 
-interface QueryEmbeddingResult {
+interface ResolvedQueryEmbedding {
   embedding: number[];
   modelId: string;
 }
@@ -757,7 +763,7 @@ interface SearchAssetsResolution {
   mode: SearchAssetsMode;
   degraded: boolean;
   degradeReason?: string;
-  embedding?: QueryEmbeddingResult;
+  embedding?: ResolvedQueryEmbedding;
 }
 
 function parseSearchAssetsArgs(raw: Record<string, unknown> | undefined): SearchAssetsArgs {
@@ -787,14 +793,15 @@ function parseSearchAssetsArgs(raw: Record<string, unknown> | undefined): Search
 async function resolveSearchAssetsMode(
   options: PostgresPiWriterDepsOptions,
   request: ExecuteWriterToolRequest,
-  args: SearchAssetsArgs
+  args: SearchAssetsArgs,
+  queryEmbeddingExecutor?: QueryEmbeddingExecutor
 ): Promise<SearchAssetsResolution> {
   const requested = args.mode ?? "hybrid";
   if (requested === "keyword") {
     return { mode: "keyword", degraded: false };
   }
   try {
-    const embedding = await resolveQueryEmbedding(options, request, args.query);
+    const embedding = await resolveQueryEmbedding(options, request, args.query, queryEmbeddingExecutor);
     return { mode: requested, degraded: false, embedding };
   } catch (error) {
     // Explicit, visible degradation — never pretend hybrid when embeddings are unavailable.
@@ -805,8 +812,9 @@ async function resolveSearchAssetsMode(
 async function resolveQueryEmbedding(
   options: PostgresPiWriterDepsOptions,
   request: ExecuteWriterToolRequest,
-  query: string
-): Promise<QueryEmbeddingResult> {
+  query: string,
+  queryEmbeddingExecutor?: QueryEmbeddingExecutor
+): Promise<ResolvedQueryEmbedding> {
   const binding = await resolveModuleBinding(options.db, {
     tenant_id: request.tenant_id,
     project_id: request.project_id,
@@ -817,6 +825,21 @@ async function resolveQueryEmbedding(
   if (provider !== "openai" && provider !== "openai-compatible") {
     throw new Error(`asset_search_embedding provider ${binding.provider} is not OpenAI-compatible`);
   }
+  if (queryEmbeddingExecutor) {
+    const result = await queryEmbeddingExecutor({
+      tenant_id: request.tenant_id,
+      project_id: request.project_id,
+      run_id: request.run_id,
+      module_key: ASSET_SEARCH_EMBEDDING_MODULE_KEY,
+      channel_id: binding.channel_id,
+      model_id: binding.model_id,
+      provider: binding.provider,
+      base_url: binding.base_url,
+      settings: binding.settings,
+      query
+    });
+    return { embedding: result.embedding, modelId: binding.model_id };
+  }
   const { apiKey } = await resolveCredential(options, {
     tenant_id: request.tenant_id,
     project_id: request.project_id,
@@ -825,19 +848,36 @@ async function resolveQueryEmbedding(
     channel_id: binding.channel_id,
     credential_ref: binding.credential_ref
   });
-  const embedding = await requestQueryEmbedding(options, request, binding, apiKey, query);
-  return { embedding, modelId: binding.model_id };
+  const result = await requestQueryEmbedding(options, {
+    tenant_id: request.tenant_id,
+    project_id: request.project_id,
+    run_id: request.run_id,
+    module_key: ASSET_SEARCH_EMBEDDING_MODULE_KEY,
+    channel_id: binding.channel_id,
+    model_id: binding.model_id,
+    provider: binding.provider,
+    base_url: binding.base_url,
+    settings: binding.settings,
+    query,
+    apiKey
+  });
+  return { embedding: result.embedding, modelId: binding.model_id };
+}
+
+async function executeQueryEmbedding(
+  options: PostgresPiWriterDepsOptions,
+  request: QueryEmbeddingRequest
+): Promise<QueryEmbeddingResult> {
+  if (!request.apiKey) throw new Error("LLM_CREDENTIAL_UNAVAILABLE: embedding provider credential is missing");
+  return requestQueryEmbedding(options, request);
 }
 
 async function requestQueryEmbedding(
   options: PostgresPiWriterDepsOptions,
-  request: ExecuteWriterToolRequest,
-  binding: ResolvedLLMModule,
-  apiKey: string,
-  query: string
-): Promise<number[]> {
-  const body: Record<string, unknown> = { model: binding.model_id, input: [query] };
-  const dimensions = positiveIntSetting(binding.settings, "embedding_dimensions");
+  request: QueryEmbeddingRequest
+): Promise<QueryEmbeddingResult> {
+  const body: Record<string, unknown> = { model: request.model_id, input: [request.query] };
+  const dimensions = positiveIntSetting(request.settings, "embedding_dimensions");
   if (dimensions !== undefined) body.dimensions = dimensions;
   const fetcher: QueryEmbeddingFetcher =
     options.fetchEmbedding ??
@@ -845,16 +885,18 @@ async function requestQueryEmbedding(
       const response = await fetch(url, { method: init.method, headers: init.headers, body: init.body });
       return { ok: response.ok, status: response.status, json: () => response.json() as Promise<unknown> };
     });
-  const base = binding.base_url.trim().replace(/\/+$/, "");
+  const base = request.base_url.trim().replace(/\/+$/, "");
   const url = base.endsWith("/embeddings") ? base : `${base}/embeddings`;
   const response = await fetcher(url, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${request.apiKey}`,
       "Content-Type": "application/json",
       "X-MiroFish-Tenant-Id": request.tenant_id,
       "X-MiroFish-Project-Id": request.project_id,
-      "X-MiroFish-Module-Key": ASSET_SEARCH_EMBEDDING_MODULE_KEY
+      "X-MiroFish-Run-Id": request.run_id,
+      "X-MiroFish-Module-Key": request.module_key,
+      ...(request.provider_call_id ? { "Idempotency-Key": request.provider_call_id } : {})
     },
     body: JSON.stringify(body)
   });
@@ -866,7 +908,28 @@ async function requestQueryEmbedding(
   if (!payload.data || payload.data.length !== 1 || first?.index !== 0 || !Array.isArray(first.embedding)) {
     throw new Error("asset query embedding provider returned an invalid response");
   }
-  return first.embedding as number[];
+  const usage = (payload as { usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; total_tokens?: unknown; cost_estimate?: unknown } }).usage;
+  const promptTokens = typeof usage?.prompt_tokens === "number" ? usage.prompt_tokens : typeof usage?.total_tokens === "number" ? usage.total_tokens : undefined;
+  // Embeddings APIs normally report input/total tokens only; normalize the
+  // absent completion side to zero so the unified quota lifecycle can account
+  // for the call without treating a valid embedding response as degraded.
+  const completionTokens = typeof usage?.completion_tokens === "number" ? usage.completion_tokens : 0;
+  const validPromptTokens = typeof promptTokens === "number" && Number.isSafeInteger(promptTokens) && promptTokens >= 0;
+  const validCompletionTokens = Number.isSafeInteger(completionTokens) && completionTokens >= 0;
+  return {
+    embedding: first.embedding as number[],
+    ...(validPromptTokens && validCompletionTokens
+      ? {
+          usage: {
+            prompt_tokens: promptTokens,
+            completion_tokens: completionTokens,
+            ...(typeof usage?.cost_estimate === "number" && Number.isFinite(usage.cost_estimate) && usage.cost_estimate >= 0
+              ? { cost_estimate: usage.cost_estimate }
+              : {})
+          }
+        }
+      : {})
+  };
 }
 
 function positiveIntSetting(settings: Record<string, unknown>, key: string): number | undefined {
@@ -1360,7 +1423,8 @@ function rerankTextFor(item: FusionItem): string {
 
 async function executeSearchAssets(
   options: PostgresPiWriterDepsOptions,
-  request: ExecuteWriterToolRequest
+  request: ExecuteWriterToolRequest,
+  queryEmbeddingExecutor?: QueryEmbeddingExecutor
 ): Promise<Record<string, unknown>> {
   const db = options.db;
   const rawArgs = (request.tool_args ?? {}) as Record<string, unknown>;
@@ -1377,7 +1441,7 @@ async function executeSearchAssets(
     return executeKeyedAssets(options, request, [queryText, ...contextTexts, ...proseTail]);
   }
   const args = parseSearchAssetsArgs(request.tool_args);
-  const resolution = await resolveSearchAssetsMode(options, request, args);
+  const resolution = await resolveSearchAssetsMode(options, request, args, queryEmbeddingExecutor);
   const useVector = resolution.mode !== "keyword" && resolution.embedding !== undefined;
   const assetTypes = args.asset_types ?? [];
   // Spoiler gate (doc 41 §4.5): withhold assets revealed only after the chapter
@@ -1736,7 +1800,8 @@ function parseSearchManuscriptArgs(raw: Record<string, unknown> | undefined): Se
 // agent never recalls prose written after the point being written.
 async function executeSearchManuscript(
   options: PostgresPiWriterDepsOptions,
-  request: ExecuteWriterToolRequest
+  request: ExecuteWriterToolRequest,
+  queryEmbeddingExecutor?: QueryEmbeddingExecutor
 ): Promise<Record<string, unknown>> {
   const db = options.db;
   const args = parseSearchManuscriptArgs(request.tool_args);
@@ -1752,9 +1817,9 @@ async function executeSearchManuscript(
   const chapterId = stringOrNull(runTarget.rows[0]?.chapter_id) ?? request.chapter_id ?? null;
   const sceneId = stringOrNull(runTarget.rows[0]?.scene_id) ?? request.scene_id ?? null;
 
-  let embedding: QueryEmbeddingResult;
+  let embedding: ResolvedQueryEmbedding;
   try {
-    embedding = await resolveQueryEmbedding(options, request, args.query);
+    embedding = await resolveQueryEmbedding(options, request, args.query, queryEmbeddingExecutor);
   } catch (error) {
     return {
       query: args.query,

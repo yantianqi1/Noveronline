@@ -248,7 +248,7 @@ Pi 接入方式：
 | `query_chapter_scene` | read | 读取目标章节、场景、大纲和 POV |
 | `query_assets` | read | 检索资产库中的角色、规则、素材、风格 |
 | `query_manuscript_context` | read | 读取前文、已采用 manuscript blocks、续写上下文 |
-| `save_draft_revision` | write | 保存本次生成结果为 draft revision |
+| `persist_draft_revision` | runtime | 由运行时保存本次生成结果为 draft revision，不暴露给模型 |
 
 ### 第二阶段工具
 
@@ -270,7 +270,7 @@ Pi 接入方式：
 - 所有工具参数用 schema 校验。
 - 每个工具必须接收 runtime context，不从全局状态猜项目。
 - `beforeToolCall` 必须检查权限和 tool allowlist。
-- `save_draft_revision` 必须幂等，重复调用不能产生脏数据。
+- draft persistence 由 runtime-owned `saveDraftRevision` activity 负责并保持幂等；不把 persistence 暴露为 Agent tool。
 
 ### Writer 查询生命周期门（规划中）
 

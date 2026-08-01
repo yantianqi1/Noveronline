@@ -349,7 +349,7 @@ function TaskTurn({
   return (
     <div className="flex flex-col gap-2.5">
       <TaskCard liveRun={liveRun} onCancel={() => onCancelRun(runId)} />
-      <ConsistencyNotice violations={state.consistencyViolations} />
+      <ConsistencyNotice violations={state.consistencyViolations} status={state.consistencyStatus} />
       <CitationsRow citations={state.citations} degraded={state.citationsDegraded} trimmedItems={state.contextTrimmedItems} />
       {state.isTerminal && state.phase === "failed" ? (
         <p className="rounded-panel border border-danger/30 bg-danger-wash px-3 py-2 text-caption leading-relaxed text-danger">
@@ -368,8 +368,26 @@ function TaskTurn({
 }
 
 /** A canon-contradiction warning — surfaced, never silent (doc 41 §4.7). */
-function ConsistencyNotice({ violations }: { violations: ConsistencyViolation[] }) {
-  if (violations.length === 0) return null;
+function ConsistencyNotice({
+  violations,
+  status,
+}: {
+  violations: ConsistencyViolation[];
+  status: "clean" | "skipped" | "degraded" | "violations" | null;
+}) {
+  if (violations.length === 0 && !status) return null;
+  if (violations.length === 0) {
+    const copy = status === "clean"
+      ? "已对照当前设定检查 · 未发现明显冲突"
+      : status === "skipped"
+        ? "本次未执行一致性检查 · 审校模型未绑定"
+        : "一致性检查未完成 · 结果不可用";
+    return (
+      <p className={`rounded-panel border px-3 py-2 text-caption leading-relaxed ${status === "degraded" ? "border-danger/30 bg-danger-wash text-danger" : "border-line-soft bg-paper/55 text-muted"}`}>
+        {copy}
+      </p>
+    );
+  }
   const major = violations.filter((v) => v.severity === "major").length;
   return (
     <div
@@ -397,46 +415,157 @@ function ConsistencyNotice({ violations }: { violations: ConsistencyViolation[] 
   );
 }
 
-/** The recall line — which settings/canon the agent grounded this draft in,
-    collapsed to one truncated muted row; every chip's title note (channel,
-    relevance, degraded, budget-trimmed) is preserved in the row's title. */
+/**
+ * The recall drawer — a compact summary by default, with one expandable row
+ * per recalled asset. The runtime only sends bounded previews, so authors can
+ * audit what the agent actually saw without opening a separate debug panel.
+ */
 function CitationsRow({ citations, degraded, trimmedItems = 0 }: { citations: RunCitation[]; degraded: boolean; trimmedItems?: number }) {
+  const [open, setOpen] = useState(false);
+  const [openCitationId, setOpenCitationId] = useState<string | null>(null);
   if (citations.length === 0 && trimmedItems === 0) return null;
-  const fullTitle = [
-    ...citations.map((c) => `${c.channel === "always_on" ? "常驻 · " : ""}${c.title}：${citationHint(c)}`),
-    ...(degraded ? ["向量检索不可用，已退回关键词召回"] : []),
-    ...(trimmedItems > 0 ? [`另有 ${trimmedItems} 条因预算未带入`] : []),
-  ].join("\n");
   return (
-    <div className="ml-5.5 truncate text-caption text-muted" title={fullTitle} aria-label="本轮召回的设定">
-      参考了{" "}
-      {citations.slice(0, 8).map((c, i) => (
-        <span key={c.assetId}>
-          {i > 0 ? " · " : ""}
-          {c.channel === "always_on" ? (
-            <span className="text-ink-soft">常驻 · {c.title}</span>
-          ) : (
-            c.title
-          )}
+    <div className="ml-5.5 overflow-hidden rounded-panel border border-line-soft bg-paper/55" aria-label="本轮召回的设定">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="flex min-h-10 w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-paper-deep/60"
+      >
+        <span className="grid size-5 shrink-0 place-items-center rounded-full bg-accent-wash text-accent" aria-hidden>
+          <Feather className="size-3" />
         </span>
-      ))}
-      {citations.length > 8 ? (
-        <span className="font-mono text-micro"> +{citations.length - 8}</span>
-      ) : null}
-      {degraded ? " ·关键词召回" : null}
-      {trimmedItems > 0 ? ` ·另有 ${trimmedItems} 条因预算未带入` : null}
+        <span className="min-w-0 flex-1 text-caption text-muted">
+          参考了 <span className="font-medium text-ink-soft">{citations.length} 项</span>
+          {trimmedItems > 0 ? <span> · 另有 {trimmedItems} 条未带入</span> : null}
+        </span>
+        <span className="shrink-0 text-caption text-muted">{open ? "收起" : "查看召回内容"}</span>
+        <ChevronDown className={`size-3.5 shrink-0 text-muted-soft transition-transform ${open ? "rotate-180" : ""}`} aria-hidden />
+      </button>
+
+      <AnimatePresence initial={false}>
+        {open ? (
+          <motion.div
+            key="recall-list"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+            className="overflow-hidden border-t border-line-soft"
+          >
+            <ol className="flex flex-col gap-1 p-1.5">
+              {citations.map((citation, index) => {
+                const itemId = `${citation.assetId}-${index}`;
+                return (
+                  <CitationItem
+                    key={itemId}
+                    citation={citation}
+                    index={index}
+                    open={openCitationId === itemId}
+                    onToggle={() => setOpenCitationId((current) => (current === itemId ? null : itemId))}
+                  />
+                );
+              })}
+            </ol>
+            {degraded ? <p className="border-t border-line-soft px-3 py-2 text-micro text-muted">语义检索不可用，本轮已退回关键词召回。</p> : null}
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
     </div>
   );
 }
 
-/** The per-citation title note, unchanged from the chip era. */
-function citationHint(c: RunCitation): string {
-  if (c.channel === "always_on") return "常驻设定 · 每次写作都在场";
-  if (c.channel === "search_manuscript") return "前文呼应 · 召回的早期正文";
-  if (typeof c.score === "number") {
-    return `相关度 ${Math.round(c.score * 100)}%${c.lifecycle ? ` · ${c.lifecycle}` : ""}`;
+function CitationItem({
+  citation,
+  index,
+  open,
+  onToggle,
+}: {
+  citation: RunCitation;
+  index: number;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const previewLabel = citation.channel === "search_manuscript" ? "前文摘录" : "召回内容";
+  const hasDetail = Boolean(citation.contentPreview || citation.summary);
+  return (
+    <li className="overflow-hidden rounded-control border border-transparent transition-colors hover:border-line-soft hover:bg-paper-deep/40">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        aria-label={`${open ? "收起" : "查看"}第 ${index + 1} 条召回：${citation.title}`}
+        className="flex min-h-11 w-full items-center gap-2 px-2 py-1.5 text-left"
+      >
+        <span className="grid size-5 shrink-0 place-items-center rounded-full border border-line bg-paper font-mono text-micro tabular-nums text-muted" aria-hidden>
+          {index + 1}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-caption font-medium text-ink-soft">{citation.title}</span>
+          <span className="mt-0.5 block truncate text-micro text-muted-soft">{citationMeta(citation)}</span>
+        </span>
+        <ChevronDown className={`size-3.5 shrink-0 text-muted-soft transition-transform ${open ? "rotate-180" : ""}`} aria-hidden />
+      </button>
+
+      <AnimatePresence initial={false}>
+        {open ? (
+          <motion.div
+            key="citation-detail"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+            className="overflow-hidden"
+          >
+            <div className="mx-2 mb-2 rounded-control bg-panel/75 px-2.5 py-2.5">
+              {citation.contentPreview ? (
+                <>
+                  <p className="text-micro font-medium text-muted">{previewLabel}</p>
+                  <p className="mt-1 whitespace-pre-wrap break-words font-serif text-caption leading-relaxed text-ink-soft">
+                    {citation.contentPreview}
+                  </p>
+                </>
+              ) : null}
+              {citation.summary && citation.summary !== citation.contentPreview ? (
+                <div className={citation.contentPreview ? "mt-2 border-t border-line-soft pt-2" : ""}>
+                  <p className="text-micro font-medium text-muted">摘要</p>
+                  <p className="mt-1 whitespace-pre-wrap break-words text-caption leading-relaxed text-muted">{citation.summary}</p>
+                </div>
+              ) : null}
+              {!hasDetail ? <p className="text-caption leading-relaxed text-muted">本轮只保留了这条来源的标题，没有可展开的内容预览。</p> : null}
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </li>
+  );
+}
+
+function citationMeta(citation: RunCitation): string {
+  const parts = [citationChannelLabel(citation.channel)];
+  if (citation.lifecycle && citation.lifecycle !== "常驻" && citation.lifecycle !== "前文") parts.push(citation.lifecycle);
+  if (typeof citation.score === "number") parts.push(`相关度 ${Math.round(citation.score * 100)}%`);
+  if (citation.relationType) parts.push(citation.relationType);
+  return parts.join(" · ");
+}
+
+function citationChannelLabel(channel: string): string {
+  switch (channel) {
+    case "query_assets":
+      return "已选资产";
+    case "search_assets":
+      return "语义召回";
+    case "search_manuscript":
+      return "前文呼应";
+    case "always_on":
+      return "常驻设定";
+    case "关联带出":
+      return "关联带出";
+    case "fuse_recall":
+      return "融合召回";
+    default:
+      return "故事资料";
   }
-  return c.lifecycle ? `设定 · ${c.lifecycle}` : "设定";
 }
 
 /** The collapsible task status — one calm line that expands to its steps. */
@@ -618,7 +747,7 @@ function SettledCard({
   return (
     <div className="flex flex-col gap-2.5">
       <TaskCard liveRun={liveRun} onCancel={() => {}} />
-      <ConsistencyNotice violations={liveRun.state.consistencyViolations} />
+      <ConsistencyNotice violations={liveRun.state.consistencyViolations} status={liveRun.state.consistencyStatus} />
       <CitationsRow citations={liveRun.state.citations} degraded={liveRun.state.citationsDegraded} trimmedItems={liveRun.state.contextTrimmedItems} />
       <div>
         <div className="-mx-1.5 flex min-h-8 items-center gap-1.5 rounded-control px-1.5 py-1 transition-colors hover:bg-line/25">

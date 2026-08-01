@@ -43,11 +43,13 @@ type ProxyOptions = {
   request: Request;
   /** Tenant scope to forward as X-Tenant-Id, when the client supplied one. */
   tenantId?: string | null;
+  /** Keep a streaming upstream body for SSE instead of buffering it as text. */
+  stream?: boolean;
 };
 
 export type ProxyResult = {
   status: number;
-  body: string;
+  body: string | ReadableStream<Uint8Array> | null;
   contentType: string;
   /** Set-Cookie headers from upstream (login/logout), relayed to the browser. */
   setCookies: string[];
@@ -68,10 +70,10 @@ function mintRequestId(): string {
 }
 
 export async function proxyToApi(options: ProxyOptions): Promise<ProxyResult> {
-  const { path, method = "GET", body, rawBody, contentType, request, tenantId } = options;
+  const { path, method = "GET", body, rawBody, contentType, request, tenantId, stream = false } = options;
 
   const headers: Record<string, string> = {
-    Accept: "application/json",
+    Accept: stream ? "text/event-stream" : "application/json",
   };
 
   // Forward the session cookie so the Go API can authenticate us.
@@ -132,7 +134,7 @@ export async function proxyToApi(options: ProxyOptions): Promise<ProxyResult> {
     throw new UpstreamUnavailableError();
   }
 
-  const text = await upstream.text();
+  const responseBody = stream ? upstream.body : await upstream.text();
   const setCookies =
     typeof upstream.headers.getSetCookie === "function"
       ? upstream.headers.getSetCookie()
@@ -140,7 +142,7 @@ export async function proxyToApi(options: ProxyOptions): Promise<ProxyResult> {
 
   return {
     status: upstream.status,
-    body: text,
+    body: responseBody,
     contentType: upstream.headers.get("Content-Type") ?? "application/json",
     setCookies,
   };

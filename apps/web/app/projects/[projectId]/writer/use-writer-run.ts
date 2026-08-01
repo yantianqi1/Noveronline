@@ -4,19 +4,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   cancelWriterRun,
-  fetchRunEvents,
   fetchWriterDraft,
   fetchWriterRun,
+  streamWriterRunEvents,
   WriterError,
 } from "@/lib/api/writer-client";
 import { reconcileWriterRunStatus, reduceWriterRun, type WriterRunState } from "@/lib/api/writer-run";
 import type { WriterEvent, WriterRun } from "@/lib/api/writer-types";
 
 /**
- * Drives one live writer run: starts it, then polls the event stream with a
- * resumable cursor (the endpoint pages at 100 with no cursor), reducing events
- * into a `WriterRunState` for the UI. Polling stops at a terminal phase; a
- * refresh of run detail reconciles the authoritative status. Cancelling sends
+ * Drives one live writer run: starts it, then reads the held-open SSE stream
+ * with a resumable event-id cursor, reducing events into a `WriterRunState` for
+ * the UI. The bounded stream reconnects until a terminal phase; a refresh of
+ * run detail reconciles the authoritative status. Cancelling sends
  * the request to the server and waits for the terminal event — never assumes.
  *
  * Once the run saves its draft, the hook also follows that draft: its status
@@ -25,8 +25,7 @@ import type { WriterEvent, WriterRun } from "@/lib/api/writer-types";
  * can keep showing exactly what was drafted.
  */
 
-const POLL_MS = 900;
-const PAGE_SIZE = 100;
+const SSE_RECONNECT_MS = 250;
 
 export type LiveRun = {
   runId: string;
@@ -51,41 +50,30 @@ export function useWriterRun(
 
   const cursorRef = useRef<string | undefined>(undefined);
   const seenRef = useRef<Set<string>>(new Set());
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
   const stopRef = useRef(false);
-  const inFlightRef = useRef(false);
-  // Draft id the reducer has surfaced so far; the poll loop syncs it below.
+  // Draft id the reducer has surfaced so far; the stream syncs it below.
   const draftIdRef = useRef<string | null>(null);
 
   const state = reconcileWriterRunStatus(reduceWriterRun(events), runStatus);
   draftIdRef.current = state.draftId;
 
-  const poll = useCallback(async () => {
-    if (!selection || !runId || stopRef.current || inFlightRef.current) return;
-    inFlightRef.current = true;
+  const acceptEvent = useCallback((event: WriterEvent) => {
+    if (stopRef.current || seenRef.current.has(event.event_id)) return;
+    seenRef.current.add(event.event_id);
+    cursorRef.current = event.event_id;
+    if (event.event_type === "writer.draft.saved") {
+      const draftId = event.payload?.draft_id;
+      if (typeof draftId === "string" && draftId.trim()) draftIdRef.current = draftId;
+    }
+    setEvents((prev) => mergeEvents(prev, [event]));
+  }, []);
+
+  const syncRunDetail = useCallback(async (): Promise<string | null> => {
+    if (!selection || !runId || stopRef.current) return null;
     try {
-      // Chase the 100-per-page cursor until a short page marks the end.
-      let after = cursorRef.current;
-      for (;;) {
-        const page = await fetchRunEvents(selection.project_id, selection.tenant_id, runId, after);
-        if (stopRef.current) return;
-        const fresh = page.filter((e) => !seenRef.current.has(e.event_id));
-        if (fresh.length > 0) {
-          for (const e of fresh) seenRef.current.add(e.event_id);
-          setEvents((prev) => mergeEvents(prev, fresh));
-        }
-        const nextAfter = page[page.length - 1]?.event_id;
-        if (nextAfter && nextAfter !== after) {
-          after = nextAfter;
-          cursorRef.current = nextAfter;
-        } else if (page.length >= PAGE_SIZE) {
-          break;
-        }
-        if (page.length < PAGE_SIZE) break;
-      }
-      // Reconcile authoritative status; stop polling once terminal.
       const detail: WriterRun = await fetchWriterRun(selection.project_id, selection.tenant_id, runId);
-      if (stopRef.current) return;
+      if (stopRef.current) return detail.status;
       setRunStatus(detail.status);
       const terminal = isTerminalStatus(detail.status);
       // Follow the saved draft: its status is the adoption source of truth for
@@ -101,7 +89,7 @@ export function useWriterRun(
             draftId,
             terminal,
           );
-          if (stopRef.current) return;
+          if (stopRef.current) return detail.status;
           const contentText = terminal ? saved.content_text ?? null : null;
           setDraft((prev) =>
             prev?.draftId === draftId
@@ -110,53 +98,68 @@ export function useWriterRun(
           );
         } catch {
           // The draft row may not be visible yet (event raced the write); the
-          // next poll tick retries. Terminal runs retry from the effect below.
+          // The next stream reconnect retries the read; terminal runs retry from
+          // the effect below.
         }
       }
-      if (terminal) {
-        const finalPage = await fetchRunEvents(selection.project_id, selection.tenant_id, runId, cursorRef.current);
-        const finalFresh = finalPage.filter((event) => !seenRef.current.has(event.event_id));
-        if (finalFresh.length > 0) {
-          finalFresh.forEach((event) => seenRef.current.add(event.event_id));
-          setEvents((prev) => mergeEvents(prev, finalFresh));
-          cursorRef.current = finalPage[finalPage.length - 1]?.event_id ?? cursorRef.current;
-        }
-        stopRef.current = true;
-        if (timerRef.current) clearInterval(timerRef.current);
-      }
+      return detail.status;
     } catch (error) {
-      // A dropped poll is non-fatal — the next tick retries from the cursor.
-      // Only stop on an auth failure, which won't recover by itself.
       if (error instanceof WriterError && error.status === 401) {
         stopRef.current = true;
-        if (timerRef.current) clearInterval(timerRef.current);
       }
-    } finally {
-      inFlightRef.current = false;
+      throw error;
     }
   }, [selection, runId]);
+
+  const stream = useCallback(async () => {
+    if (!selection || !runId) return;
+    while (!stopRef.current) {
+      const controller = new AbortController();
+      streamAbortRef.current = controller;
+      try {
+        await streamWriterRunEvents(
+          selection.project_id,
+          selection.tenant_id,
+          runId,
+          cursorRef.current,
+          controller.signal,
+          acceptEvent,
+        );
+        const status = await syncRunDetail();
+        if (status && isTerminalStatus(status)) {
+          stopRef.current = true;
+          break;
+        }
+      } catch (error) {
+        if (controller.signal.aborted || stopRef.current) break;
+        if (error instanceof WriterError && error.status === 401) break;
+        // A closed hold window or transient network failure is recoverable.
+      } finally {
+        if (streamAbortRef.current === controller) streamAbortRef.current = null;
+      }
+      if (stopRef.current) break;
+      await delay(SSE_RECONNECT_MS);
+    }
+  }, [acceptEvent, runId, selection, syncRunDetail]);
 
   useEffect(() => {
     if (!selection || !runId) return;
     stopRef.current = false;
-    inFlightRef.current = false;
     cursorRef.current = undefined;
     seenRef.current = new Set();
+    draftIdRef.current = null;
     setEvents([]);
     setDraft(null);
     setRunStatus(null);
-    void poll();
-    timerRef.current = setInterval(() => {
-      void poll();
-    }, POLL_MS);
+    void stream();
     return () => {
       stopRef.current = true;
-      if (timerRef.current) clearInterval(timerRef.current);
-      timerRef.current = null;
+      streamAbortRef.current?.abort();
+      streamAbortRef.current = null;
     };
-  }, [selection, runId, poll]);
+  }, [selection, runId, stream]);
 
-  // Terminal runs stop the interval, so a late draft-status change (adoption
+  // Terminal runs stop the stream, so a late draft-status change (adoption
   // from another surface) is re-synced once via this one-shot fetch.
   useEffect(() => {
     if (!selection || !state.isTerminal || !state.draftId) return;
@@ -184,7 +187,7 @@ export function useWriterRun(
     setCancelling(true);
     void cancelWriterRun(selection.project_id, selection.tenant_id, csrfToken, runId)
       .catch(() => {
-        // surfaced via the run's eventual terminal state; keep polling
+      // surfaced via the run's eventual terminal state; keep the stream loop
       })
       .finally(() => setCancelling(false));
   }, [selection, csrfToken, runId, cancelling]);
@@ -204,4 +207,8 @@ function mergeEvents(existing: WriterEvent[], incoming: WriterEvent[]): WriterEv
 function isTerminalStatus(status: string): boolean {
   const s = status.toLowerCase();
   return s === "completed" || s === "failed" || s === "cancelled" || s === "canceled";
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

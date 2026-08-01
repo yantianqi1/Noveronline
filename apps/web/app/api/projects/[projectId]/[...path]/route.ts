@@ -381,7 +381,8 @@ async function handle(
   }
 
   try {
-    const result = await proxyToApi({ path: goPath, method, body, request, tenantId });
+    const stream = method === "GET" && /^writer-runs\/[^/]+\/events$/.test(rest) && url.searchParams.get("stream") === "1";
+    const result = await proxyToApi({ path: goPath, method, body, request, tenantId, stream });
     return toResponse(result);
   } catch (error) {
     if (error instanceof UpstreamUnavailableError) {

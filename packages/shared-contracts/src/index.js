@@ -44,6 +44,5 @@ export const WRITER_TOOL_NAMES = Object.freeze([
   "query_graph_neighbors",
   "query_asset_relationships",
   "query_worldline_paths",
-  "query_manuscript_context",
-  "save_draft_revision"
+  "query_manuscript_context"
 ]);

@@ -45,6 +45,29 @@ export interface Credential {
   apiKey: string;
 }
 
+/** Runtime-only request for a query embedding provider call. */
+export interface QueryEmbeddingRequest {
+  tenant_id: string;
+  project_id: string;
+  run_id: string;
+  module_key: string;
+  channel_id: string;
+  model_id: string;
+  provider: string;
+  base_url: string;
+  settings: Record<string, unknown>;
+  query: string;
+  apiKey?: string;
+  provider_call_id?: string;
+}
+
+export interface QueryEmbeddingResult {
+  embedding: number[];
+  usage?: PiWriterUsage;
+}
+
+export type QueryEmbeddingExecutor = (request: QueryEmbeddingRequest) => Promise<QueryEmbeddingResult>;
+
 export interface ComposeDraftRequest {
   tenant_id: string;
   project_id: string;
@@ -91,8 +114,7 @@ export type WriterToolName =
   | "query_graph_neighbors"
   | "query_asset_relationships"
   | "query_worldline_paths"
-  | "query_manuscript_context"
-  | "save_draft_revision";
+  | "query_manuscript_context";
 
 export type SearchAssetsMode = "keyword" | "vector" | "hybrid";
 
@@ -558,7 +580,9 @@ export interface PiWriterRunActivityDeps {
    */
   loadWorldlineTimeline?(request: ExecuteWriterToolRequest): Promise<{ timelines: WorldlineTimeline[] }>;
   orchestrateWritingBrief?(request: OrchestrateWritingBriefRequest): Promise<OrchestrateWritingBriefResult>;
-  executeWriterTool?(request: ExecuteWriterToolRequest): Promise<Record<string, unknown>>;
+  executeWriterTool?(request: ExecuteWriterToolRequest, queryEmbeddingExecutor?: QueryEmbeddingExecutor): Promise<Record<string, unknown>>;
+  /** Performs the raw provider request; the activity wraps it in quota/lease lifecycle. */
+  executeQueryEmbedding?(request: QueryEmbeddingRequest): Promise<QueryEmbeddingResult>;
   resolveCredential(request: CredentialRequest): Promise<Credential>;
   reserveLLMQuota?(request: ReserveLLMQuotaRequest): Promise<LLMQuotaReservation>;
   finalizeLLMQuota?(request: FinalizeLLMQuotaRequest): Promise<void>;
@@ -1299,6 +1323,44 @@ async function runDualStagePiWriterActivity(
       );
     }
 
+    let embeddingCallIndex = 0;
+    const queryEmbeddingExecutor: QueryEmbeddingExecutor | undefined = deps.executeQueryEmbedding
+      ? async (request) => {
+          const resolution: ResolvedLLMModule = {
+            module_key: request.module_key,
+            channel_id: request.channel_id,
+            model_id: request.model_id,
+            provider: request.provider,
+            base_url: request.base_url,
+            credential_ref: request.channel_id,
+            supports_tools: false,
+            supports_json: false,
+            settings: request.settings
+          };
+          const call = await executeLLMStage(
+            deps,
+            input,
+            resolution,
+            "embedding",
+            embeddingCallIndex++,
+            (apiKey, providerCallID) => deps.executeQueryEmbedding!({
+              ...request,
+              apiKey,
+              provider_call_id: providerCallID
+            })
+          );
+          await recordStageTelemetry(
+            deps,
+            input,
+            resolution,
+            call.result.usage,
+            0,
+            call.provider_call_id
+          );
+          return call.result;
+        }
+      : undefined;
+
     const orchestratorCall = await executeLLMStage(
       deps,
       input,
@@ -1393,7 +1455,7 @@ async function runDualStagePiWriterActivity(
             tool_name: toolName,
             tool_args: toolArgs,
             ...(toolName === "fuse_recall" && rerankExecutor ? { rerank_executor: rerankExecutor } : {})
-          });
+          }, queryEmbeddingExecutor);
           // always_on is constant context, not relevance recall — it never counts
           // against the retrieval token budget.
           if (toolName === "fuse_recall") return raw;
@@ -1703,23 +1765,66 @@ function candidateReadyThreadBody(content: string): string {
   return `候选稿已写好（${chars} 字），见左侧画布。`;
 }
 
-function publicWriterToolResult(toolName: string, value: unknown): Record<string, unknown> {
+export function publicWriterToolResult(toolName: string, value: unknown): Record<string, unknown> {
   const source = objectRecord(value);
   if (toolName === "query_assets") {
-    return { items: recordArray(source.assets).map((item) => pickFields(item, ["asset_id", "asset_type", "category", "lifecycle", "title", "summary"])) };
+    return {
+      items: recordArray(source.assets).map((item) => ({
+        ...pickFields(item, ["asset_id", "asset_type", "category", "lifecycle", "title", "summary"]),
+        ...publicRecallPreview(item)
+      }))
+    };
   }
   if (toolName === "search_assets") {
+    const citationsById = new Map(
+      recordArray(source.citations)
+        .filter((item) => typeof item.asset_id === "string")
+        .map((item) => [item.asset_id as string, item])
+    );
+    const assetsById = new Map(
+      recordArray(source.assets)
+        .filter((item) => typeof item.asset_id === "string")
+        .map((item) => [item.asset_id as string, item])
+    );
+    const items = recordArray(source.assets).length > 0
+      ? recordArray(source.assets).map((asset) => ({
+          ...pickFields(citationsById.get(String(asset.asset_id)) ?? asset, ["asset_id", "title", "lifecycle", "score", "channel"]),
+          ...publicRecallPreview(asset)
+        }))
+      : recordArray(source.citations).map((item) => ({
+          ...pickFields(item, ["asset_id", "title", "lifecycle", "score", "channel"]),
+          ...publicRecallPreview(assetsById.get(String(item.asset_id)) ?? item)
+        }));
     return {
       mode_used: typeof source.mode_used === "string" ? source.mode_used : "keyword",
       degraded: source.degraded === true,
-      items: recordArray(source.citations).map((item) => pickFields(item, ["asset_id", "title", "lifecycle", "score", "channel"]))
+      items
     };
   }
   if (toolName === "search_manuscript") {
+    const citationsById = new Map(
+      recordArray(source.citations)
+        .filter((item) => typeof item.block_id === "string")
+        .map((item) => [item.block_id as string, item])
+    );
+    const blocksById = new Map(
+      recordArray(source.manuscript_blocks)
+        .filter((item) => typeof item.block_id === "string")
+        .map((item) => [item.block_id as string, item])
+    );
+    const items = recordArray(source.manuscript_blocks).length > 0
+      ? recordArray(source.manuscript_blocks).map((block) => ({
+          ...pickFields(citationsById.get(String(block.block_id)) ?? block, ["block_id", "chapter_id", "block_order", "score", "channel"]),
+          ...publicRecallPreview(block, "snippet")
+        }))
+      : recordArray(source.citations).map((item) => ({
+          ...pickFields(item, ["block_id", "chapter_id", "block_order", "score", "channel"]),
+          ...publicRecallPreview(blocksById.get(String(item.block_id)) ?? item, "snippet")
+        }));
     return {
       mode_used: typeof source.mode_used === "string" ? source.mode_used : "unavailable",
       degraded: source.degraded === true,
-      items: recordArray(source.citations).map((item) => pickFields(item, ["block_id", "chapter_id", "block_order", "score", "channel"]))
+      items
     };
   }
   if (toolName === "fuse_recall") {
@@ -1728,8 +1833,11 @@ function publicWriterToolResult(toolName: string, value: unknown): Record<string
     return {
       items: recordArray(source.citations).map((item) => {
         const channels = Array.isArray(item.channels) ? item.channels.filter((c): c is string => typeof c === "string") : [];
+        const payload = objectRecord(item.payload);
         return {
           ...pickFields(item, ["asset_id", "title"]),
+          ...pickFields(payload, ["asset_type", "category", "lifecycle", "summary"]),
+          ...publicRecallPreview(payload),
           channel: channels.includes("always_on") ? "always_on" : "fuse_recall"
         };
       })
@@ -1758,9 +1866,10 @@ function publicWriterToolResult(toolName: string, value: unknown): Record<string
   if (toolName === "query_asset_relationships") {
     return {
       ...(typeof source.asset_id === "string" ? { asset_id: source.asset_id } : {}),
-      items: recordArray(source.relationships).map((item) => pickFields(item, [
-        "asset_id", "asset_type", "lifecycle", "title", "relation_type", "direction"
-      ]))
+      items: recordArray(source.relationships).map((item) => ({
+        ...pickFields(item, ["asset_id", "asset_type", "lifecycle", "title", "relation_type", "direction"]),
+        ...publicRecallPreview(item)
+      }))
     };
   }
   if (toolName === "query_worldline_paths") {
@@ -1784,6 +1893,29 @@ function publicWriterToolResult(toolName: string, value: unknown): Record<string
     return { project: pickFields(objectRecord(source.project), ["title", "genre", "language", "status"]) };
   }
   return {};
+}
+
+/**
+ * Keep the author-visible recall event useful without persisting private
+ * source fields. Runtime tool results already carry a bounded preview for
+ * search/query paths; this helper renames it to the public event field and
+ * applies the same bound when a selected-asset result still uses content_text.
+ */
+function publicRecallPreview(
+  item: Record<string, unknown>,
+  preferredKey = "content_preview"
+): Record<string, unknown> {
+  const raw = item[preferredKey] ?? item.content_preview ?? item.content_text;
+  const summary = typeof item.summary === "string" ? item.summary.trim() : "";
+  return {
+    ...(summary ? { summary: clipPublicRecallText(summary) } : {}),
+    ...(typeof raw === "string" && raw.trim() ? { content_preview: clipPublicRecallText(raw) } : {})
+  };
+}
+
+function clipPublicRecallText(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.length > 280 ? `${trimmed.slice(0, 280)}…` : trimmed;
 }
 
 function objectRecord(value: unknown): Record<string, unknown> {
@@ -1896,7 +2028,7 @@ async function executeLLMStage<T extends { usage?: PiWriterUsage }>(
   deps: PiWriterRunActivityDeps,
   input: WriterRunInput,
   resolution: ResolvedLLMModule,
-  stage: "orchestrator" | "composer" | "planner" | "rerank" | "consistency",
+  stage: "orchestrator" | "composer" | "planner" | "rerank" | "consistency" | "embedding",
   callIndex: number,
   execute: (apiKey: string, providerCallID: string) => Promise<T>
 ): Promise<ExecutedLLMStage<T>> {

@@ -196,12 +196,12 @@ type ProjectDraftReviewQueue struct {
 }
 
 type ProjectDraftReviewBucket struct {
-	DraftID        string                `json:"draft_id"`
-	ChapterID      string                `json:"chapter_id,omitempty"`
-	Instruction    string                `json:"instruction,omitempty"`
-	DraftWordCount int                   `json:"word_count"`
-	OpenCount      int                   `json:"open_count"`
-	Issues         []ProjectReviewIssue  `json:"issues"`
+	DraftID        string               `json:"draft_id"`
+	ChapterID      string               `json:"chapter_id,omitempty"`
+	Instruction    string               `json:"instruction,omitempty"`
+	DraftWordCount int                  `json:"word_count"`
+	OpenCount      int                  `json:"open_count"`
+	Issues         []ProjectReviewIssue `json:"issues"`
 }
 
 // ProjectReviewIssue embeds the issue with its draft + chapter context. The
@@ -522,7 +522,10 @@ type TemporalWriterStarter struct {
 	cancellationWaitTimeout time.Duration
 	mu                      sync.RWMutex
 	runs                    map[string]WriterRun
+	runCacheOrder           []string
 }
+
+const temporalWriterRunCacheLimit = 1024
 
 func NewTemporalWriterStarter(config TemporalWriterConfig) *TemporalWriterStarter {
 	taskQueue := strings.TrimSpace(config.TaskQueue)
@@ -548,9 +551,45 @@ func NewTemporalWriterStarter(config TemporalWriterConfig) *TemporalWriterStarte
 		cancellationStore:       cancellationStore,
 		cancellationWaitTimeout: cancellationWaitTimeout,
 		runs:                    map[string]WriterRun{},
+		runCacheOrder:           make([]string, 0, temporalWriterRunCacheLimit),
 	}
 }
 
+// cacheRun keeps only a small, non-authoritative admission cache. Production
+// reads come from SQLWriterReader; this cache exists for starter-local
+// compatibility and cancellation bookkeeping, so terminal entries must not
+// remain resident for the lifetime of the API process.
+func (s *TemporalWriterStarter) cacheRun(run WriterRun) {
+	if isTerminalWriterRunStatus(run.Status) {
+		delete(s.runs, run.RunID)
+		for index, cachedID := range s.runCacheOrder {
+			if cachedID != run.RunID {
+				continue
+			}
+			s.runCacheOrder = append(s.runCacheOrder[:index], s.runCacheOrder[index+1:]...)
+			break
+		}
+		return
+	}
+	if _, exists := s.runs[run.RunID]; !exists {
+		s.runCacheOrder = append(s.runCacheOrder, run.RunID)
+	}
+	s.runs[run.RunID] = run
+	for len(s.runCacheOrder) > temporalWriterRunCacheLimit {
+		oldest := s.runCacheOrder[0]
+		s.runCacheOrder = s.runCacheOrder[1:]
+		delete(s.runs, oldest)
+	}
+}
+
+func isTerminalWriterRunStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "completed", "failed", "cancelled", "canceled":
+		return true
+	default:
+		return false
+	}
+}
 
 func (s *TemporalWriterStarter) StartWriterRun(ctx context.Context, input StartWriterRunInput) (WriterRun, error) {
 	if input.TenantID == "" || input.ProjectID == "" || input.Mode == "" || input.Instruction == "" {
@@ -623,7 +662,7 @@ func (s *TemporalWriterStarter) StartWriterRun(ctx context.Context, input StartW
 		}
 		if replayed {
 			s.mu.Lock()
-			s.runs[admitted.RunID] = admitted
+			s.cacheRun(admitted)
 			s.mu.Unlock()
 			return admitted, nil
 		}
@@ -680,7 +719,7 @@ func (s *TemporalWriterStarter) StartWriterRun(ctx context.Context, input StartW
 		}
 	}
 	s.mu.Lock()
-	s.runs[run.RunID] = run
+	s.cacheRun(run)
 	s.mu.Unlock()
 	return run, nil
 }
@@ -745,7 +784,7 @@ func (s *TemporalWriterStarter) CancelWriterRun(ctx context.Context, input Cance
 	s.mu.Lock()
 	if run, ok := s.runs[runID]; ok && run.TenantID == strings.TrimSpace(input.TenantID) {
 		run.Status = status
-		s.runs[runID] = run
+		s.cacheRun(run)
 	}
 	s.mu.Unlock()
 	return WriterRunCancellation{RunID: runID, Status: status}, nil

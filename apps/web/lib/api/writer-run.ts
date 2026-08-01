@@ -31,6 +31,14 @@ export type RunCitation = {
   channel: string;
   /** Relevance score when the recall channel reports one. */
   score?: number;
+  /** Author-visible bounded preview; never the private content_text field. */
+  contentPreview?: string;
+  summary?: string;
+  assetType?: string;
+  category?: string;
+  relationType?: string;
+  direction?: string;
+  blockOrder?: number;
 };
 
 /** The retrieval planner's outcome — did the run plan its recall up front? */
@@ -46,6 +54,8 @@ export type ConsistencyViolation = {
   conflict: string;
   severity: "minor" | "major";
 };
+
+export type ConsistencyCheckStatus = "clean" | "skipped" | "degraded" | "violations";
 
 export type WriterRunState = {
   phase: RunPhase;
@@ -65,6 +75,8 @@ export type WriterRunState = {
   contextTrimmedItems: number;
   /** Post-generation consistency violations (canon contradictions), if any. */
   consistencyViolations: ConsistencyViolation[];
+  /** Explicit outcome of the optional consistency stage. */
+  consistencyStatus: ConsistencyCheckStatus | null;
   /** Concatenated candidate prose from writer.token events. */
   candidateText: string;
   /** Set when the run saved a draft (writer.draft.saved). */
@@ -142,6 +154,7 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
   let retrievalPlan: RetrievalPlanSummary | null = null;
   let contextTrimmedItems = 0;
   const consistencyViolations: ConsistencyViolation[] = [];
+  let consistencyStatus: ConsistencyCheckStatus | null = null;
 
   // Process in stream order.
   const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
@@ -175,6 +188,22 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
           };
         }
         if (failed) break;
+        if (payload.tool_name === "query_assets") {
+          const result = (payload.result ?? {}) as Record<string, unknown>;
+          for (const item of Array.isArray(result.items) ? result.items : []) {
+            const c = item as Record<string, unknown>;
+            const assetId = typeof c.asset_id === "string" ? c.asset_id : "";
+            if (!assetId || seenCitationIds.has(assetId)) continue;
+            seenCitationIds.add(assetId);
+            citations.push({
+              assetId,
+              title: typeof c.title === "string" && c.title.trim() ? c.title : "未命名设定",
+              lifecycle: typeof c.lifecycle === "string" ? c.lifecycle : "",
+              channel: "query_assets",
+              ...citationMetadata(c)
+            });
+          }
+        }
         if (payload.tool_name === "search_assets") {
           const result = (payload.result ?? {}) as Record<string, unknown>;
           if (result.degraded === true) citationsDegraded = true;
@@ -188,7 +217,7 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
               title: typeof c.title === "string" && c.title.trim() ? c.title : "未命名设定",
               lifecycle: typeof c.lifecycle === "string" ? c.lifecycle : "",
               channel: typeof c.channel === "string" ? c.channel : "search_assets",
-              ...(typeof c.score === "number" ? { score: c.score } : {}),
+              ...citationMetadata(c)
             });
           }
         }
@@ -207,7 +236,8 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
               title: order !== null ? `前文呼应 · 第 ${order + 1} 段` : "前文呼应",
               lifecycle: "前文",
               channel: "search_manuscript",
-              ...(typeof c.score === "number" ? { score: c.score } : {}),
+              ...(order !== null ? { blockOrder: order } : {}),
+              ...citationMetadata(c)
             });
           }
         }
@@ -227,6 +257,7 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
               title: typeof c.title === "string" && c.title.trim() ? c.title : "未命名设定",
               lifecycle: "常驻",
               channel: "always_on",
+              ...citationMetadata(c),
             });
           }
         }
@@ -244,6 +275,7 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
               title: typeof c.title === "string" && c.title.trim() ? c.title : "未命名设定",
               lifecycle: typeof c.lifecycle === "string" ? c.lifecycle : "",
               channel: "关联带出",
+              ...citationMetadata(c),
             });
           }
         }
@@ -303,6 +335,7 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
         if (typeof payload.draft_id === "string") draftId = payload.draft_id;
         break;
       case "writer.consistency.violations": {
+        consistencyStatus = "violations";
         const items = Array.isArray(payload.violations) ? payload.violations : [];
         for (const item of items) {
           const v = item as Record<string, unknown>;
@@ -317,6 +350,15 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
         }
         break;
       }
+      case "writer.consistency.clean":
+        consistencyStatus = "clean";
+        break;
+      case "writer.consistency.skipped":
+        consistencyStatus = "skipped";
+        break;
+      case "writer.consistency.degraded":
+        consistencyStatus = "degraded";
+        break;
       case "writer.run.completed":
         phase = "completed";
         break;
@@ -343,6 +385,7 @@ export function reduceWriterRun(events: WriterEvent[]): WriterRunState {
     retrievalPlan,
     contextTrimmedItems,
     consistencyViolations,
+    consistencyStatus,
     candidateText,
     draftId,
     terminalMessage,
@@ -389,6 +432,21 @@ function toolLabel(payload: Record<string, unknown>, ordinal: number): string {
     if (TOOL_LABELS[key]) return TOOL_LABELS[key];
   }
   return `查阅故事资料 · 第 ${ordinal} 项`;
+}
+
+function citationMetadata(payload: Record<string, unknown>): Pick<RunCitation, "score" | "contentPreview" | "summary" | "assetType" | "category" | "relationType" | "direction"> {
+  const preview = typeof payload.content_preview === "string" ? payload.content_preview.trim() :
+    typeof payload.snippet === "string" ? payload.snippet.trim() : "";
+  const summary = typeof payload.summary === "string" ? payload.summary.trim() : "";
+  return {
+    ...(typeof payload.score === "number" ? { score: payload.score } : {}),
+    ...(preview ? { contentPreview: preview } : {}),
+    ...(summary ? { summary } : {}),
+    ...(typeof payload.asset_type === "string" ? { assetType: payload.asset_type } : {}),
+    ...(typeof payload.category === "string" ? { category: payload.category } : {}),
+    ...(typeof payload.relation_type === "string" ? { relationType: payload.relation_type } : {}),
+    ...(typeof payload.direction === "string" ? { direction: payload.direction } : {}),
+  };
 }
 
 function statusLineFor(

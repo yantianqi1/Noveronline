@@ -143,7 +143,9 @@ Writer UI -> writer run API -> Pi Writer Runtime -> LLM Facility -> writer tools
   - `query_chapter_scene`
   - `query_assets`
   - `query_manuscript_context`
-  - `save_draft_revision`
+
+Draft persistence is runtime-owned after the composer stage; it is not exposed
+as an orchestrator tool and is not part of the model-facing tool contract.
 - SSE 事件最小集：
   - `writer.run.started`
   - `writer.token`

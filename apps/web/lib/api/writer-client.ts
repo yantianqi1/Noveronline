@@ -22,6 +22,9 @@ import type {
   WriterRun,
   WriterThread,
 } from "@/lib/api/writer-types";
+import { parseWriterEventSSEFrame } from "./writer-sse";
+
+export { parseWriterEventSSEFrame } from "./writer-sse";
 
 /**
  * Browser-side client for the Writer workbench's canvas + manuscript surface
@@ -463,6 +466,60 @@ export async function fetchRunEvents(
     tenantId,
   );
   return data.items ?? [];
+}
+
+/**
+ * Read the held-open writer SSE stream. The server may close after its bounded
+ * hold window; callers reconnect with the last event id rather than falling
+ * back to a high-frequency event-table poll.
+ */
+export async function streamWriterRunEvents(
+  projectId: string,
+  tenantId: string,
+  runId: string,
+  afterEventId: string | undefined,
+  signal: AbortSignal,
+  onEvent: (event: WriterEvent) => void,
+): Promise<void> {
+  const query = new URLSearchParams({ stream: "1" });
+  if (afterEventId) query.set("after_event_id", afterEventId);
+  const response = await fetch(
+    `/api/projects/${projectId}/writer-runs/${runId}/events?${query.toString()}`,
+    {
+      headers: { Accept: "text/event-stream", "X-Tenant-Id": tenantId },
+      cache: "no-store",
+      signal,
+    },
+  );
+  if (!response.ok) throw await readError(response);
+  if (!response.body) throw new WriterError("事件流没有返回可读取的响应体", "STREAM_BODY_MISSING", response.status);
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+      let boundary = buffer.search(/\r?\n\r?\n/);
+      while (boundary >= 0) {
+        const match = buffer.match(/\r?\n\r?\n/);
+        const separatorLength = match?.[0].length ?? 2;
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + separatorLength);
+        const event = parseWriterEventSSEFrame(frame);
+        if (event) onEvent(event);
+        boundary = buffer.search(/\r?\n\r?\n/);
+      }
+      if (done) break;
+    }
+    if (buffer.trim()) {
+      const event = parseWriterEventSSEFrame(buffer);
+      if (event) onEvent(event);
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 // ── W2: candidate adoption ───────────────────────────────────────────────

@@ -7,6 +7,7 @@ import {
   reconcileWriterRunStatus,
   reduceWriterRun,
 } from "../lib/api/writer-run.ts";
+import { parseWriterEventSSEFrame } from "../lib/api/writer-sse.ts";
 
 let seq = 0;
 function ev(event_type, payload = {}) {
@@ -20,6 +21,21 @@ test("queued run with no events is not terminal", () => {
   assert.equal(state.isTerminal, false);
   assert.equal(state.candidateText, "");
   assert.equal(state.draftId, null);
+});
+
+test("writer SSE frames parse data and ignore keepalive comments", () => {
+  assert.deepEqual(
+    parseWriterEventSSEFrame(
+      ": keepalive\n\n",
+    ),
+    null,
+  );
+  assert.deepEqual(
+    parseWriterEventSSEFrame(
+      "id: e1\nevent: workflow.event\ndata: {\"event_id\":\"e1\",\"sequence\":1,\"event_type\":\"writer.run.started\",\"payload\":{}}\n",
+    ),
+    { event_id: "e1", sequence: 1, event_type: "writer.run.started", payload: {} },
+  );
 });
 
 test("only control-plane active statuses may lock the composer", () => {
@@ -186,6 +202,47 @@ test("search_assets completions collect deduped citations and the degraded flag"
   assert.equal(state.citationsDegraded, false);
 });
 
+test("recall citations keep bounded previews and selected assets", () => {
+  const state = reduceWriterRun([
+    ev("writer.run.started"),
+    ev("writer.tool.completed", {
+      tool_call_id: "selected",
+      tool_name: "query_assets",
+      result: {
+        items: [{
+          asset_id: "a1",
+          asset_type: "world_rule",
+          lifecycle: "canon",
+          title: "渡口规矩",
+          summary: "夜渡需先报姓名。",
+          content_preview: "船靠第三根木桩时，必须先报姓名，再交灯火。",
+        }],
+      },
+    }),
+    ev("writer.tool.completed", {
+      tool_call_id: "search",
+      tool_name: "search_assets",
+      result: {
+        items: [{
+          asset_id: "a2",
+          title: "旧案",
+          lifecycle: "seed",
+          channel: "search_assets",
+          score: 0.82,
+          content_preview: "三年前的雨夜，旧案从一枚断裂的铜扣开始。",
+        }],
+      },
+    }),
+  ]);
+
+  assert.deepEqual(state.citations.map((citation) => citation.assetId), ["a1", "a2"]);
+  assert.equal(state.citations[0].contentPreview, "船靠第三根木桩时，必须先报姓名，再交灯火。");
+  assert.equal(state.citations[0].summary, "夜渡需先报姓名。");
+  assert.equal(state.citations[0].channel, "query_assets");
+  assert.equal(state.citations[1].score, 0.82);
+  assert.equal(state.citations[1].contentPreview, "三年前的雨夜，旧案从一枚断裂的铜扣开始。");
+});
+
 test("search_assets keyword fallback marks citationsDegraded", () => {
   const state = reduceWriterRun([
     ev("writer.run.started"),
@@ -290,6 +347,7 @@ test("consistency violation events are collected for the author notice", () => {
   assert.equal(state.consistencyViolations[0].canonLabel, "师父不可杀");
   assert.equal(state.consistencyViolations[0].severity, "major");
   assert.equal(state.consistencyViolations[1].severity, "minor");
+  assert.equal(state.consistencyStatus, "violations");
 });
 
 test("a clean run has no consistency violations", () => {
@@ -299,6 +357,19 @@ test("a clean run has no consistency violations", () => {
     ev("writer.run.completed"),
   ]);
   assert.equal(state.consistencyViolations.length, 0);
+  assert.equal(state.consistencyStatus, "clean");
+
+  const skipped = reduceWriterRun([
+    ev("writer.run.started"),
+    ev("writer.consistency.skipped", { reason: "checker_unbound" }),
+  ]);
+  assert.equal(skipped.consistencyStatus, "skipped");
+
+  const degraded = reduceWriterRun([
+    ev("writer.run.started"),
+    ev("writer.consistency.degraded", { message: "provider unavailable" }),
+  ]);
+  assert.equal(degraded.consistencyStatus, "degraded");
 });
 
 test("search_manuscript results become 前文 citations with scores kept", () => {

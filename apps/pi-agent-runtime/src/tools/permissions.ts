@@ -12,9 +12,6 @@ export function assertToolAllowed(
   if (!context.permissions.tools.includes(toolName)) {
     throw new ToolPermissionDenied(`tool is not allowed for this run: ${toolName}`);
   }
-  if (toolName === "save_draft_revision" && !context.permissions.can_write_draft) {
-    throw new ToolPermissionDenied("run cannot write draft revisions");
-  }
   const payload = args as Partial<{
     tenant_id: string;
     project_id: string;

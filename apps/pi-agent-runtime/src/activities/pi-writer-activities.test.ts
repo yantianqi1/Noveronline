@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createPiWriterRunActivity,
+  publicWriterToolResult,
   runPiWriterRunActivity,
   type ProviderStageCheckpoint,
   type WriterToolName
@@ -24,6 +25,36 @@ const basePayload = {
     target_scene_id: "scene-1"
   }
 };
+
+describe("publicWriterToolResult", () => {
+  it("keeps bounded recall previews while omitting private source fields", () => {
+    const result = publicWriterToolResult("search_assets", {
+      assets: [{
+        asset_id: "asset-1",
+        title: "渡口规矩",
+        lifecycle: "canon",
+        summary: "夜渡需先报姓名。",
+        content_preview: "船靠第三根木桩时，必须先报姓名，再交灯火。"
+      }],
+      citations: [{ asset_id: "asset-1", title: "渡口规矩", lifecycle: "canon", score: 0.91, channel: "search_assets" }]
+    });
+
+    expect(result).toEqual({
+      mode_used: "keyword",
+      degraded: false,
+      items: [{
+        asset_id: "asset-1",
+        title: "渡口规矩",
+        lifecycle: "canon",
+        score: 0.91,
+        channel: "search_assets",
+        summary: "夜渡需先报姓名。",
+        content_preview: "船靠第三根木桩时，必须先报姓名，再交灯火。"
+      }]
+    });
+    expect(JSON.stringify(result)).not.toContain("content_text");
+  });
+});
 
 describe("runPiWriterRunActivity", () => {
   it("quota-gates both provider stages with stable identities and finalizes actual usage once", async () => {
@@ -99,6 +130,59 @@ describe("runPiWriterRunActivity", () => {
       "reserve:writer_composer", "lease:writer_composer", "provider:writer_composer",
       `finalize:${providerCalls[1]}`, "release-lease:writer_composer-channel"
     ]);
+  });
+
+  it("quota-gates embedding calls made inside retrieval tools", async () => {
+    const stages: string[] = [];
+    const activity = createPiWriterRunActivity({
+      resolveModuleBinding: async ({ module_key }) => ({
+        module_key,
+        channel_id: `${module_key}-channel`, model_id: `${module_key}-model`, provider: "openai-compatible",
+        base_url: "http://127.0.0.1:1/v1", credential_ref: `${module_key}-channel`,
+        supports_tools: module_key === "writer_orchestrator", supports_json: true,
+        settings: { quota_reserved_tokens: 1000, input_cost: 1, output_cost: 2 }
+      }),
+      resolveCredential: async () => ({ apiKey: "private-key" }),
+      reserveLLMQuota: async (request) => {
+        stages.push(`reserve:${request.module_key}`);
+        return { reservation_id: `reservation-${request.provider_call_id}`, provider_call_id: request.provider_call_id, status: "reserved", expires_at: "2026-07-10T12:05:00.000Z" };
+      },
+      finalizeLLMQuota: async (request) => { stages.push(`finalize:${request.provider_call_id}`); },
+      releaseLLMQuota: async () => undefined,
+      acquireLLMLease: async (request) => ({ lease_id: `lease-${request.run_id}`, channel_id: request.channel_id, lock_mode: "slot:0" }),
+      releaseLLMLease: async () => undefined,
+      executeQueryEmbedding: async (request) => {
+        stages.push(`provider:${request.module_key}`);
+        return { embedding: [0.1, 0.2], usage: { prompt_tokens: 2, completion_tokens: 0, cost_estimate: 0.000001 } };
+      },
+      executeWriterTool: async (request, embed) => {
+        if (request.tool_name === "search_assets") {
+          await embed?.({
+            tenant_id: request.tenant_id, project_id: request.project_id, run_id: request.run_id,
+            module_key: "asset_search_embedding", channel_id: "embedding-channel", model_id: "embedding-model",
+            provider: "openai-compatible", base_url: "http://127.0.0.1:1/v1", settings: { quota_reserved_tokens: 1000 },
+            query: "师门"
+          });
+        }
+        return { items: [] };
+      },
+      orchestrateWritingBrief: async (request) => {
+        await request.executeTool("search_assets", "search-1", { query: "师门" });
+        return { writing_brief: "brief", usage: { prompt_tokens: 1, completion_tokens: 1, cost_estimate: 0.000001 } };
+      },
+      composeDraft: async () => ({ content: "draft", usage: { prompt_tokens: 1, completion_tokens: 1, cost_estimate: 0.000001 } }),
+      saveDraftRevision: async () => ({ draft_id: "draft-1" }),
+      recordLLMActivity: async () => undefined,
+      recordUsageEvent: async () => undefined,
+      recordAgentTraceEvent: async () => undefined,
+      recordWorkflowEvent: async () => undefined,
+      updateWriterRunStatus: async () => undefined
+    });
+
+    await expect(activity(basePayload)).resolves.toMatchObject({ status: "completed" });
+    expect(stages.filter((stage) => stage === "reserve:asset_search_embedding")).toHaveLength(1);
+    expect(stages).toContain("provider:asset_search_embedding");
+    expect(stages.some((stage) => stage.startsWith("finalize:pi-writer:v1:asset_search_embedding:embedding:0:"))).toBe(true);
   });
 
   it("releases reservation and lease when provider usage is missing", async () => {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"regexp"
 	"strings"
@@ -736,6 +737,26 @@ func TestTemporalWriterStarterStartsPiWriterWorkflowWithoutWaitingForCompletion(
 	options := payload["options"].(map[string]any)
 	if options["module_key"] != "writer_composer" || options["asset_ids"].([]any)[0] != "asset-1" {
 		t.Fatalf("lost writer options: %#v", options)
+	}
+}
+
+func TestTemporalWriterStarterRunCacheIsBoundedAndDropsTerminalEntries(t *testing.T) {
+	starter := NewTemporalWriterStarter(TemporalWriterConfig{})
+	for index := 0; index < temporalWriterRunCacheLimit+25; index++ {
+		starter.cacheRun(WriterRun{
+			RunID:     fmt.Sprintf("run-%d", index),
+			TenantID:  "tenant-1",
+			ProjectID: "project-1",
+			Status:    "queued",
+		})
+	}
+	if len(starter.runs) > temporalWriterRunCacheLimit {
+		t.Fatalf("run cache exceeded bound: %d", len(starter.runs))
+	}
+
+	starter.cacheRun(WriterRun{RunID: "terminal", TenantID: "tenant-1", Status: "completed"})
+	if _, ok := starter.runs["terminal"]; ok {
+		t.Fatal("terminal writer run should not remain in the starter cache")
 	}
 }
 

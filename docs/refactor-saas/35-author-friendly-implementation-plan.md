@@ -48,7 +48,7 @@
 | `query_character_profile` | 核对人物设定 |
 | `query_graph_neighbors` | 核对人物关系 |
 | `query_worldline_paths` | 参考剧情推演 |
-| `save_draft_revision` | 保存修改建议 |
+| runtime-owned draft persistence | 保存修改建议（不作为模型工具暴露） |
 | 未知工具 | 处理写作请求 |
 | `queued` / `running` | 等待开始 / 正在处理 |
 | `failed` | 未完成 |

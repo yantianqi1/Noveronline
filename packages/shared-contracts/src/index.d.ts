@@ -35,8 +35,7 @@ export type WriterToolName =
   | "query_graph_neighbors"
   | "query_asset_relationships"
   | "query_worldline_paths"
-  | "query_manuscript_context"
-  | "save_draft_revision";
+  | "query_manuscript_context";
 
 export interface WriterLLMResolution {
   module_key: string;
