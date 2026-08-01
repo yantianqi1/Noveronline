@@ -8,6 +8,12 @@ from temporalio.api.enums.v1 import WorkflowExecutionStatus
 from temporalio.client import Client, WorkflowFailureError
 
 
+_TENANTS_SQL = """
+SELECT tenant_id::text
+FROM tenants
+ORDER BY tenant_id
+"""
+
 _SEED_RUN_ROWS_SQL = """
 SELECT tenant_id::text, run_id::text, project_id::text,
        temporal_workflow_id, temporal_run_id, status
@@ -72,13 +78,30 @@ class SeedWorkflowStatusMonitor:
             await asyncio.sleep(self._interval_seconds)
 
     async def _reconcile_once(self) -> None:
-        for row in self._load_rows():
-            await self._reconcile_row(row)
+        # workflow_runs is tenant-isolated via forced row security; there is no
+        # cross-tenant read path for the runtime role. The tenants table is
+        # not isolated, so scan every tenant with its own tenant context.
+        for tenant_id in self._load_tenants():
+            for row in self._load_run_rows(tenant_id):
+                await self._reconcile_row(row)
 
-    def _load_rows(self) -> list[dict[str, Any]]:
+    def _load_tenants(self) -> list[str]:
         connection = self._connect()
         try:
             with connection.cursor() as cursor:
+                cursor.execute(_TENANTS_SQL)
+                return [str(row[0]) for row in cursor.fetchall()]
+        finally:
+            connection.close()
+
+    def _load_run_rows(self, tenant_id: str) -> list[dict[str, Any]]:
+        connection = self._connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT app_set_tenant_context(%s::uuid, NULL, false)",
+                    (tenant_id,),
+                )
                 cursor.execute(_SEED_RUN_ROWS_SQL)
                 columns = [column.name for column in (cursor.description or [])]
                 return [dict(zip(columns, values)) for values in cursor.fetchall()]
@@ -131,6 +154,12 @@ class SeedWorkflowStatusMonitor:
         connection = self._connect()
         try:
             with connection.cursor() as cursor:
+                # Fresh connection: row security requires the tenant context
+                # before the UPDATE can match the isolated row.
+                cursor.execute(
+                    "SELECT app_set_tenant_context(%s::uuid, NULL, false)",
+                    (row.get("tenant_id"),),
+                )
                 cursor.execute(
                     """UPDATE workflow_runs
                        SET status = %s,
