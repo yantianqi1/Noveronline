@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -53,3 +54,31 @@ def test_pi_live_fixture_requires_the_disposable_database_marker() -> None:
     assert "current_database()" in live_test
     assert "mirofish.live_test" in live_test
     assert "^mirofish_test_" in live_test
+
+
+def test_app_stack_includes_workers_required_by_api_readiness() -> None:
+    runner = _text(RUNNER)
+    app_start = runner.split('if [ "$start_app" -eq 1 ]; then', 1)[1].split("\nfi", 1)[0]
+    assert app_start.rstrip().endswith("up -d --build --wait")
+    assert "--wait api web" not in app_start
+
+
+def test_each_migration_has_a_restart_sentinel_and_runner_owned_ledger() -> None:
+    bootstrap = _text(ROOT / "infra" / "scripts" / "bootstrap-compose-database.sh")
+    for migration in (ROOT / "infra" / "postgres" / "migrations").glob("[0-9][0-9][0-9][0-9]_*.sql"):
+        assert f"{migration.name[:4]}_*)" in bootstrap, f"Missing restart sentinel: {migration.name}"
+        assert "INSERT INTO mirofish_schema_migrations" not in _text(migration), migration.name
+
+
+def test_fresh_stack_creates_runtime_role_before_granting_ledger_access() -> None:
+    bootstrap = _text(ROOT / "infra" / "scripts" / "bootstrap-compose-database.sh")
+    assert bootstrap.index("CREATE ROLE %I LOGIN") < bootstrap.index("GRANT SELECT ON mirofish_schema_migrations")
+
+
+def test_api_build_image_satisfies_the_module_go_version() -> None:
+    module = _text(ROOT / "apps" / "api" / "go.mod")
+    dockerfile = _text(ROOT / "infra" / "docker" / "api.Dockerfile")
+    required = re.search(r"^go (\d+)\.(\d+)", module, re.MULTILINE)
+    supplied = re.search(r"FROM golang:(\d+)\.(\d+)", dockerfile)
+    assert required and supplied
+    assert tuple(map(int, supplied.groups())) >= tuple(map(int, required.groups()))

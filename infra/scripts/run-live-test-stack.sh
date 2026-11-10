@@ -71,7 +71,9 @@ docker compose -f "$compose_file" -p "$COMPOSE_PROJECT_NAME" exec -T postgres \
   -c "ALTER DATABASE \"$POSTGRES_DB\" SET \"mirofish.live_test\" = 'on'" >/dev/null
 
 if [ "$start_app" -eq 1 ]; then
-  docker compose -f "$compose_file" -p "$COMPOSE_PROJECT_NAME" up -d --build --wait api web
+  # API readiness requires every workflow/activity poller. Start the workers
+  # alongside API/Web so a fresh namespace can become ready.
+  docker compose -f "$compose_file" -p "$COMPOSE_PROJECT_NAME" up -d --build --wait
 fi
 
 admin_url="postgresql://${POSTGRES_USER:-mirofish}:${POSTGRES_PASSWORD:-mirofish_dev_password}@127.0.0.1:$POSTGRES_PORT/$POSTGRES_DB?sslmode=disable&application_name=mirofish-live-test"
