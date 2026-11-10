@@ -7,15 +7,16 @@ import json
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.database import get_engine
 from app.repositories.writer_run_repo import LOCAL_TENANT_ID, LOCAL_USER_ID, WriterRunRepository
 from app.services.pi_writer_runtime import PiWriterRuntime
 from app.services.pi_writer_runtime.errors import LlmModuleUnboundError, WriterRunError
+from app.middleware.auth import require_admin
 
-router = APIRouter(tags=["writer-runs-v1"])
+router = APIRouter(tags=["writer-runs-v1"], dependencies=[Depends(require_admin)])
 
 
 def _error_response(

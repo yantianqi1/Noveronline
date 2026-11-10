@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 
-from fastapi import APIRouter, File, Form, UploadFile
+from fastapi import APIRouter, File, Form, Request, UploadFile
 
 from app.config import Config
 from app.models.project import ProjectManager, ProjectStatus
@@ -23,17 +24,35 @@ router = APIRouter(prefix="/project", tags=["project"])
 
 SEED_TASK_RECOVERY_ERROR = "种子分析任务已中断，服务可能已重启，请重新上传并重试。"
 GRAPH_TASK_RECOVERY_ERROR = "图谱构建任务已中断，服务可能已重启，请重新发起构建。"
+SAFE_STEP_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 class UploadFileStorageAdapter:
-    def __init__(self, upload: UploadFile):
+    def __init__(self, upload: UploadFile, max_content_length: int | None = None):
         self.filename = upload.filename or ""
         self._upload = upload
+        self._max_content_length = max_content_length or Config.MAX_CONTENT_LENGTH
 
     def save(self, path: str) -> None:
         self._upload.file.seek(0)
-        with open(path, "wb") as file_obj:
-            file_obj.write(self._upload.file.read())
+        total = 0
+        chunk_size = 1024 * 1024
+        try:
+            with open(path, "wb") as file_obj:
+                while True:
+                    chunk = self._upload.file.read(chunk_size)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > self._max_content_length:
+                        raise ValueError("上传文件超过允许大小")
+                    file_obj.write(chunk)
+        except Exception:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            raise
 
 
 def allowed_file(filename: str) -> bool:
@@ -94,6 +113,7 @@ def _task_payload(task_id: str, task_type: str, error_message: str, timestamp: s
 
 @router.post("/seed/extract")
 async def extract_story_seed(
+    request: Request,
     analysis_goal: str = Form(""),
     project_name: str = Form("Untitled Novel Project"),
     additional_context: str = Form(""),
@@ -111,7 +131,8 @@ async def extract_story_seed(
             return err("请至少上传一个文件", status_code=400)
         project = ProjectManager.create_project(name=project_name.strip() or "Untitled Novel Project")
         project.analysis_goal = analysis_goal.strip()
-        saved_count = _save_uploads(project, uploads)
+        max_content_length = getattr(request.app.state.settings, "MAX_CONTENT_LENGTH", Config.MAX_CONTENT_LENGTH)
+        saved_count = _save_uploads(project, uploads, max_content_length)
         if not saved_count:
             ProjectManager.delete_project(project.project_id)
             return err("没有成功处理任何文档", status_code=400)
@@ -130,11 +151,11 @@ async def extract_story_seed(
         return err(exc)
 
 
-def _save_uploads(project, uploads: list[UploadFile]) -> int:
+def _save_uploads(project, uploads: list[UploadFile], max_content_length: int | None = None) -> int:
     saved_count = 0
     for upload in uploads:
         file_info = ProjectManager.save_file_to_project(
-            project.project_id, UploadFileStorageAdapter(upload), upload.filename or "",
+            project.project_id, UploadFileStorageAdapter(upload, max_content_length), upload.filename or "",
         )
         project.files.append({
             "filename": file_info["original_filename"],
@@ -283,6 +304,8 @@ async def cancel_task(task_id: str):
 
 @router.get("/task/{task_id}/steps/{step_id}/trace")
 async def get_step_trace(task_id: str, step_id: str):
+    if not SAFE_STEP_ID.fullmatch(step_id or ""):
+        return no_store({"success": False, "error": "invalid step_id"}, status_code=400)
     task = await TaskManager().get_task(task_id)
     if not task:
         return no_store({"success": False, "error": "任务不存在"}, status_code=404)

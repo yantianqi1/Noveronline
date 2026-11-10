@@ -70,6 +70,45 @@ def test_admin_secret_protects_llm_write_routes(tmp_path):
     assert health_response.status_code == 200
 
 
+def test_admin_secret_protects_v2_llm_write_routes(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    client = TestClient(create_app(settings=_settings(tmp_path, ADMIN_SECRET="token")))
+
+    response = client.post("/api/v2/llm/channels", json={})
+
+    assert response.status_code == 401
+
+
+def test_production_like_empty_admin_secret_fails_closed(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    client = TestClient(create_app(settings=_settings(
+        tmp_path, ADMIN_SECRET="", DEBUG=False,
+    )))
+
+    response = client.post("/api/v2/llm/channels", json={})
+
+    assert response.status_code == 503
+
+
+def test_production_like_legacy_api_fails_closed_without_admin_secret(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    client = TestClient(create_app(settings=_settings(tmp_path, ADMIN_SECRET="", DEBUG=False)))
+
+    response = client.get("/api/project/list")
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "legacy API authentication is not configured"
+
+
 def test_fastapi_app_serves_legacy_api_contract(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 

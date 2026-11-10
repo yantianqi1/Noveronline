@@ -14,6 +14,7 @@ from ..database import get_engine
 from ..repositories.llm_repo import LlmRepository
 from .llm_concurrency_service import llm_concurrency_service
 from .llm_module_registry import get_llm_module, list_llm_modules
+from ..utils.outbound_url import validate_base_url
 
 
 def _now() -> str:
@@ -61,7 +62,10 @@ class LlmSettingsService:
 
     async def create_channel(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         name = self._require_text(payload, "name")
-        base_url = self._require_text(payload, "base_url")
+        base_url = validate_base_url(
+            self._require_text(payload, "base_url"),
+            allowed_hosts=Config.LLM_ALLOWED_BASE_URL_HOSTS,
+        )
         api_key = self._require_text(payload, "api_key")
         max_concurrency = self._resolve_max_concurrency(payload)
         channel_key = f"channel_{uuid.uuid4().hex[:12]}"
@@ -87,7 +91,10 @@ class LlmSettingsService:
         updated = {
             "channel_key": channel_key,
             "name": self._optional_text(payload, "name") or row["name"],
-            "base_url": self._optional_text(payload, "base_url") or row["base_url"],
+            "base_url": validate_base_url(
+                self._optional_text(payload, "base_url") or row["base_url"],
+                allowed_hosts=Config.LLM_ALLOWED_BASE_URL_HOSTS,
+            ),
             "api_key": self._optional_text(payload, "api_key") or row["api_key"],
             "max_concurrency": self._resolve_max_concurrency(
                 payload,
@@ -198,6 +205,10 @@ class LlmSettingsService:
         }
 
     def _fetch_models_from_upstream(self, base_url: str, api_key: str) -> List[Dict[str, Any]]:
+        base_url = validate_base_url(
+            base_url,
+            allowed_hosts=Config.LLM_ALLOWED_BASE_URL_HOSTS,
+        )
         client = self.openai_factory(
             api_key=api_key,
             base_url=base_url,

@@ -104,5 +104,5 @@ def test_rollback_and_bootstrap_sentinel_are_wired() -> None:
     assert "0018_manuscript_asset_distillation" in rollback
     assert "0018_*)" in bootstrap
     assert "project_asset_distillation_settings" in bootstrap
-    assert 'latestRequiredMigration = "0019_writer_threads"' in readiness
-    assert "requiredMigrationCount  = 19" in readiness or "requiredMigrationCount = 19" in readiness
+    assert 'latestRequiredMigration = "0032_email_verification"' in readiness
+    assert "requiredMigrationCount  = 32" in readiness or "requiredMigrationCount = 32" in readiness

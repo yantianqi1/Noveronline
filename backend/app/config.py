@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     NARRATIVE_DEFAULT_BRANCH_COUNT: int = 1
     NARRATIVE_DEFAULT_TIMELINE_STEPS: int = 12
     ADMIN_SECRET: str = ""
+    CORS_ALLOWED_ORIGINS: str = ""
+    LLM_ALLOWED_BASE_URL_HOSTS: str = "api.openai.com,api.aiwanai.cc"
 
     # 深度阅读(sequential_reader) 段级重试策略
     SEED_SEGMENT_RETRY_MAX_ATTEMPTS: int = 2
@@ -97,7 +99,7 @@ class Config:
 
     ZEP_API_KEY = os.environ.get("ZEP_API_KEY")
 
-    MAX_CONTENT_LENGTH = 100 * 1024 * 1024
+    MAX_CONTENT_LENGTH = int(os.environ.get("MAX_CONTENT_LENGTH", str(100 * 1024 * 1024)))
     UPLOAD_FOLDER = _DEFAULT_UPLOAD_FOLDER
     ALLOWED_EXTENSIONS = {"pdf", "md", "txt", "markdown"}
 
@@ -108,6 +110,10 @@ class Config:
     NARRATIVE_DEFAULT_TIMELINE_STEPS = int(os.environ.get("NARRATIVE_DEFAULT_TIMELINE_STEPS", "12"))
 
     ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
+    CORS_ALLOWED_ORIGINS = os.environ.get("CORS_ALLOWED_ORIGINS", "")
+    LLM_ALLOWED_BASE_URL_HOSTS = os.environ.get(
+        "LLM_ALLOWED_BASE_URL_HOSTS", "api.openai.com,api.aiwanai.cc"
+    )
 
     @classmethod
     def validate(cls):

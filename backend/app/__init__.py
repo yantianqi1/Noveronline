@@ -14,6 +14,22 @@ def create_app():
 class _FastApiCompatClient:
     def __init__(self, app):
         self.client = TestClient(app)
+        # Keep one TestClient portal alive for the whole compatibility
+        # client's lifetime. Background tasks started by legacy async routes
+        # must outlive the individual HTTP response.
+        self.client.__enter__()
+        self._closed = False
+
+    def close(self):
+        if not self._closed:
+            self.client.__exit__(None, None, None)
+            self._closed = True
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def get(self, url, query_string=None, **kwargs):
         return _CompatResponse(self.client.get(url, params=query_string, **_client_kwargs(kwargs)))

@@ -47,6 +47,13 @@ def _row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
     return d
 
 
+def _validate_scope(scope: str, project_id: str | None) -> None:
+    if scope not in {GLOBAL_SCOPE, PROJECT_SCOPE}:
+        raise ValueError("scope must be global or project")
+    if scope == PROJECT_SCOPE and not project_id:
+        raise ValueError("project scope requires project_id")
+
+
 # ----------------------------------------------------------------------
 # Service
 # ----------------------------------------------------------------------
@@ -78,6 +85,7 @@ class AssetsService:
         pinned: bool = False,
         asset_id: str | None = None,
     ) -> dict[str, Any]:
+        _validate_scope(scope, project_id)
         if not title.strip():
             raise ValueError("title is required")
         if scope == PROJECT_SCOPE and not project_id:
@@ -114,6 +122,7 @@ class AssetsService:
         project_id: str | None = None,
         **fields: Any,
     ) -> dict[str, Any]:
+        _validate_scope(scope, project_id)
         allowed = {
             "asset_type", "category", "title", "summary", "content",
             "source_kind", "source_ref",
@@ -135,7 +144,7 @@ class AssetsService:
         if not update_vals:
             return self.get(asset_id, scope=scope, project_id=project_id) or {}
         update_vals["updated_at"] = _now()
-        self._repo.update_asset(asset_id, **update_vals)
+        self._repo.update_asset(asset_id, scope=scope, project_id=project_id, **update_vals)
         return self.get(asset_id, scope=scope, project_id=project_id) or {}
 
     def delete(
@@ -145,7 +154,8 @@ class AssetsService:
         scope: str,
         project_id: str | None = None,
     ) -> bool:
-        return self._repo.delete_asset(asset_id) > 0
+        _validate_scope(scope, project_id)
+        return self._repo.delete_asset(asset_id, scope=scope, project_id=project_id) > 0
 
     # -- read ----------------------------------------------------------
 
@@ -156,8 +166,21 @@ class AssetsService:
         scope: str,
         project_id: str | None = None,
     ) -> dict[str, Any] | None:
-        row = self._repo.get_asset(asset_id)
+        _validate_scope(scope, project_id)
+        row = self._repo.get_asset(asset_id, scope=scope, project_id=project_id)
         return _row_to_dict(row) if row else None
+
+    def get_project_asset(self, asset_id: str) -> dict[str, Any] | None:
+        """Read a project asset after resolving and applying its own scope.
+
+        This is for server-generated resource continuations whose request
+        body may omit ``project_id``. It does not expose an unscoped asset
+        read: the returned row is fetched through the normal project scope.
+        """
+        project_id = self._repo.get_project_id(asset_id)
+        if not project_id:
+            return None
+        return self.get(asset_id, scope=PROJECT_SCOPE, project_id=project_id)
 
     def find(self, asset_id: str, project_id: str | None = None) -> dict[str, Any] | None:
         """Look up an asset across both layers (project first, then global)."""
@@ -178,6 +201,7 @@ class AssetsService:
         limit: int = 200,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
+        _validate_scope(scope, project_id)
         rows = self._repo.list_assets(
             scope=scope,
             project_id=project_id,
@@ -201,6 +225,7 @@ class AssetsService:
         limit: int = 20,
     ) -> list[dict[str, Any]]:
         """Search within a single layer using LIKE."""
+        _validate_scope(scope, project_id)
         rows = self._repo.search_assets(
             query,
             scope=scope,
@@ -298,7 +323,10 @@ class AssetsService:
         ids = list(asset_ids)
         if not ids:
             return 0
-        return self._repo.batch_set_enabled(ids, enabled, updated_at=_now())
+        _validate_scope(scope, project_id)
+        return self._repo.batch_set_enabled(
+            ids, enabled, updated_at=_now(), scope=scope, project_id=project_id,
+        )
 
     def batch_set_category(
         self,
@@ -311,7 +339,10 @@ class AssetsService:
         ids = list(asset_ids)
         if not ids:
             return 0
-        return self._repo.batch_set_category(ids, category, updated_at=_now())
+        _validate_scope(scope, project_id)
+        return self._repo.batch_set_category(
+            ids, category, updated_at=_now(), scope=scope, project_id=project_id,
+        )
 
     # -- links ---------------------------------------------------------
 
@@ -324,6 +355,11 @@ class AssetsService:
         scope: str,
         project_id: str | None = None,
     ) -> None:
+        _validate_scope(scope, project_id)
+        if not self.get(src_asset_id, scope=scope, project_id=project_id):
+            raise ValueError("source asset is outside the requested scope")
+        if not self.get(dst_asset_id, scope=scope, project_id=project_id):
+            raise ValueError("destination asset is outside the requested scope")
         self._repo.upsert_link({
             "src_asset_id": src_asset_id,
             "dst_asset_id": dst_asset_id,
@@ -339,4 +375,9 @@ class AssetsService:
         scope: str,
         project_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        return self._repo.list_links(src_asset_id)
+        _validate_scope(scope, project_id)
+        if not self.get(src_asset_id, scope=scope, project_id=project_id):
+            return []
+        return self._repo.list_links(
+            src_asset_id, scope=scope, project_id=project_id,
+        )

@@ -145,6 +145,41 @@ def test_delete(isolated_assets):
     assert svc.get(a["asset_id"], scope=GLOBAL_SCOPE) is None
 
 
+def test_project_asset_update_and_delete_are_scope_bound(isolated_assets):
+    svc = isolated_assets
+    project_a = "project-a"
+    project_b = "project-b"
+    asset = svc.create(
+        scope=PROJECT_SCOPE, project_id=project_a,
+        asset_type="note", title="private asset",
+    )
+
+    assert svc.get(asset["asset_id"], scope=PROJECT_SCOPE, project_id=project_b) is None
+    assert svc.update(
+        asset["asset_id"], scope=PROJECT_SCOPE, project_id=project_b,
+        title="must not update",
+    ) == {}
+    assert svc.delete(asset["asset_id"], scope=PROJECT_SCOPE, project_id=project_b) is False
+
+    current = svc.get(asset["asset_id"], scope=PROJECT_SCOPE, project_id=project_a)
+    assert current is not None
+    assert current["title"] == "private asset"
+
+
+def test_project_asset_resolution_reapplies_own_scope(isolated_assets):
+    svc = isolated_assets
+    asset = svc.create(
+        scope=PROJECT_SCOPE, project_id="project-a",
+        asset_type="draft_session", title="private draft",
+    )
+
+    resolved = svc.get_project_asset(asset["asset_id"])
+
+    assert resolved is not None
+    assert resolved["project_id"] == "project-a"
+    assert svc.get_project_asset("missing-asset") is None
+
+
 def test_link_persists_project_id(isolated_assets):
     """project 范围下的 link 必须把 project_id 写入 asset_links，
     否则 cascade_delete_project 按 project_id 过滤删除时会漏掉它们。"""

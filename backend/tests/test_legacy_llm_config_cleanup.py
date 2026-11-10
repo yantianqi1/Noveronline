@@ -31,6 +31,8 @@ def test_runtime_surfaces_do_not_reference_legacy_llm_env_vars():
         for path in files:
             if path.is_dir():
                 continue
+            if not path.exists():
+                continue
             if path.suffix not in TEXT_SUFFIXES and path.name != ".env.example":
                 continue
             text = path.read_text(encoding="utf-8")

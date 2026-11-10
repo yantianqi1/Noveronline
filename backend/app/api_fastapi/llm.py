@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.services.llm_activity_tracker import llm_activity_tracker
 from app.services.llm_concurrency_service import llm_concurrency_service
@@ -11,8 +11,13 @@ from app.services.llm_settings_service import LlmSettingsService
 from app.schemas.llm_schemas import CreateChannelRequest, ModuleBindingRequest, UpdateChannelRequest
 
 from .common import err, ok, status_for_value_error
+from ..middleware.auth import require_admin
 
-router = APIRouter(prefix="/llm", tags=["llm"])
+router = APIRouter(
+    prefix="/llm",
+    tags=["llm"],
+    dependencies=[Depends(require_admin)],
+)
 
 
 @router.get("/settings")

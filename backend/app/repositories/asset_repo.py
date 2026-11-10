@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Engine, and_, delete, insert, or_, select, update
+from sqlalchemy import Engine, and_, delete, false, insert, or_, select, update
 
 from app.tables.assets import asset_links, assets
 
@@ -59,10 +59,47 @@ class AssetRepository(BaseRepository):
         with self.connect() as conn:
             return [dict(r._mapping) for r in conn.execute(stmt).fetchall()]
 
-    def get_asset(self, asset_id: str) -> dict[str, Any] | None:
-        stmt = select(assets).where(assets.c.asset_id == asset_id)
+    @staticmethod
+    def _scope_clause(scope: str | None, project_id: str | None):
+        if scope is None:
+            return None
+        if scope == "global":
+            return and_(assets.c.scope == "global", assets.c.project_id.is_(None))
+        if scope == "project" and project_id:
+            return and_(assets.c.scope == "project", assets.c.project_id == project_id)
+        return false()
+
+    def get_asset(
+        self,
+        asset_id: str,
+        *,
+        scope: str | None = None,
+        project_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        clauses = [assets.c.asset_id == asset_id]
+        scope_clause = self._scope_clause(scope, project_id)
+        if scope_clause is not None:
+            clauses.append(scope_clause)
+        stmt = select(assets).where(and_(*clauses))
         with self.connect() as conn:
             return self.row_to_dict(conn.execute(stmt).fetchone())
+
+    def get_project_id(self, asset_id: str) -> str | None:
+        """Resolve the owning project for a project-scoped asset.
+
+        This returns only scope metadata. Callers must still perform the
+        actual read through ``get_asset(..., scope="project", project_id=...)``.
+        """
+        stmt = select(assets.c.project_id).where(
+            and_(
+                assets.c.asset_id == asset_id,
+                assets.c.scope == "project",
+                assets.c.project_id.is_not(None),
+            ),
+        )
+        with self.connect() as conn:
+            row = conn.execute(stmt).fetchone()
+        return str(row[0]) if row and row[0] else None
 
     def list_by_scope(
         self,
@@ -83,7 +120,7 @@ class AssetRepository(BaseRepository):
         with self.connect() as conn:
             conn.execute(insert(assets).values(**values))
 
-    def update_asset(self, asset_id: str, **kwargs: Any) -> int:
+    def update_asset(self, asset_id: str, *, scope: str, project_id: str | None = None, **kwargs: Any) -> int:
         """UPDATE specific columns for an asset.
 
         Only the keyword arguments provided are written; unknown keys are
@@ -93,26 +130,30 @@ class AssetRepository(BaseRepository):
         payload = {k: v for k, v in kwargs.items() if k in allowed}
         if not payload:
             return 0
+        scope_clause = self._scope_clause(scope, project_id)
         with self.connect() as conn:
             result = conn.execute(
-                update(assets).where(assets.c.asset_id == asset_id).values(**payload),
+                update(assets).where(
+                    and_(assets.c.asset_id == asset_id, scope_clause),
+                ).values(**payload),
             )
             return result.rowcount or 0
 
-    def delete_asset(self, asset_id: str) -> int:
+    def delete_asset(self, asset_id: str, *, scope: str, project_id: str | None = None) -> int:
         """Delete an asset and all its links (both directions)."""
         with self.connect() as conn:
-            conn.execute(
-                delete(asset_links).where(
-                    or_(
-                        asset_links.c.src_asset_id == asset_id,
-                        asset_links.c.dst_asset_id == asset_id,
-                    ),
+            result = conn.execute(delete(assets).where(and_(
+                assets.c.asset_id == asset_id,
+                self._scope_clause(scope, project_id),
+            )))
+            if not result.rowcount:
+                return 0
+            conn.execute(delete(asset_links).where(
+                or_(
+                    asset_links.c.src_asset_id == asset_id,
+                    asset_links.c.dst_asset_id == asset_id,
                 ),
-            )
-            result = conn.execute(
-                delete(assets).where(assets.c.asset_id == asset_id),
-            )
+            ))
             return result.rowcount or 0
 
     # ------------------------------------------------------------------
@@ -167,13 +208,18 @@ class AssetRepository(BaseRepository):
         enabled: bool,
         *,
         updated_at: str,
+        scope: str,
+        project_id: str | None = None,
     ) -> int:
         if not asset_ids:
             return 0
         with self.connect() as conn:
             result = conn.execute(
                 update(assets)
-                .where(assets.c.asset_id.in_(asset_ids))
+                .where(and_(
+                    assets.c.asset_id.in_(asset_ids),
+                    self._scope_clause(scope, project_id),
+                ))
                 .values(enabled=1 if enabled else 0, updated_at=updated_at),
             )
             return result.rowcount or 0
@@ -184,13 +230,18 @@ class AssetRepository(BaseRepository):
         category: str,
         *,
         updated_at: str,
+        scope: str,
+        project_id: str | None = None,
     ) -> int:
         if not asset_ids:
             return 0
         with self.connect() as conn:
             result = conn.execute(
                 update(assets)
-                .where(assets.c.asset_id.in_(asset_ids))
+                .where(and_(
+                    assets.c.asset_id.in_(asset_ids),
+                    self._scope_clause(scope, project_id),
+                ))
                 .values(category=category or "", updated_at=updated_at),
             )
             return result.rowcount or 0
@@ -214,22 +265,40 @@ class AssetRepository(BaseRepository):
             if existing is None:
                 conn.execute(insert(asset_links).values(**values))
 
-    def list_links(self, asset_id: str) -> list[dict[str, Any]]:
+    def list_links(
+        self,
+        asset_id: str,
+        *,
+        scope: str,
+        project_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """List all outgoing links from *asset_id*."""
-        stmt = select(asset_links).where(
+        stmt = select(asset_links).where(and_(
             asset_links.c.src_asset_id == asset_id,
-        )
+            asset_links.c.project_id == (project_id if scope == "project" else None),
+        ))
         with self.connect() as conn:
             return [dict(r._mapping) for r in conn.execute(stmt).fetchall()]
 
-    def delete_links_for_asset(self, asset_id: str) -> int:
-        """Delete all links where *asset_id* is src or dst."""
+    def delete_links_for_asset(
+        self,
+        asset_id: str,
+        *,
+        scope: str,
+        project_id: str | None = None,
+    ) -> int:
+        """Delete links for an asset inside the requested scope."""
         with self.connect() as conn:
             result = conn.execute(
                 delete(asset_links).where(
-                    or_(
-                        asset_links.c.src_asset_id == asset_id,
-                        asset_links.c.dst_asset_id == asset_id,
+                    and_(
+                        or_(
+                            asset_links.c.src_asset_id == asset_id,
+                            asset_links.c.dst_asset_id == asset_id,
+                        ),
+                        asset_links.c.project_id == (
+                            project_id if scope == "project" else None
+                        ),
                     ),
                 ),
             )

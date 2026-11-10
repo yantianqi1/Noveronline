@@ -27,7 +27,7 @@ def test_v2_llm_facility_routes_match_legacy_contract(tmp_path, monkeypatch):
         "/api/v2/llm/channels",
         json={
             "name": "V2 Channel",
-            "base_url": "https://api.example.com/v1",
+            "base_url": "https://api.openai.com/v1",
             "api_key": "sk-v2-123456",
             "is_enabled": True,
             "max_concurrency": 3,

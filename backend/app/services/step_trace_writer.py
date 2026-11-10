@@ -6,11 +6,13 @@ import json
 import logging
 import os
 import tempfile
+import re
 from typing import Any, Dict, Optional
 
 from ..config import Config
 
 logger = logging.getLogger(__name__)
+_SAFE_STEP_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 def _traces_dir(project_id: str, task_id: str) -> str:
@@ -20,6 +22,9 @@ def _traces_dir(project_id: str, task_id: str) -> str:
 
 
 def _bundle_path(project_id: str, task_id: str, step_id: str) -> str:
+    for name, value in (("project_id", project_id), ("task_id", task_id), ("step_id", step_id)):
+        if not _SAFE_STEP_ID.fullmatch(value or ""):
+            raise ValueError(f"invalid {name}")
     return os.path.join(_traces_dir(project_id, task_id), f"{step_id}.json")
 
 

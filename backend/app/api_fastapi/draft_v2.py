@@ -124,7 +124,7 @@ def _persist_revision_request(draft_id: str, payload: dict[str, Any]) -> dict[st
 
 
 def _load_draft_request(draft_id: str) -> dict[str, Any]:
-    asset = AssetsService().get(draft_id, scope=PROJECT_SCOPE)
+    asset = AssetsService().get_project_asset(draft_id)
     if not asset or asset.get("asset_type") != "draft_session":
         raise LookupError("未找到 draft request")
     request = (asset.get("payload") or {}).get("request")
@@ -134,7 +134,7 @@ def _load_draft_request(draft_id: str) -> dict[str, Any]:
 
 
 def _load_revision_request(draft_id: str, revision_id: str) -> dict[str, Any]:
-    asset = AssetsService().get(revision_id, scope=PROJECT_SCOPE)
+    asset = AssetsService().get_project_asset(revision_id)
     if not asset or asset.get("asset_type") != "draft_revision":
         raise LookupError("未找到 revision request")
     payload = asset.get("payload") or {}

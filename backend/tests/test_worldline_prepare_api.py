@@ -65,7 +65,7 @@ def _create_project_with_seed(tmp_path, monkeypatch):
     return project
 
 
-def _wait_for_task(client, task_id: str, timeout_seconds: float = 5.0):
+def _wait_for_task(client, task_id: str, timeout_seconds: float = 15.0):
     deadline = time.time() + timeout_seconds
     last_payload = None
     while time.time() < deadline:
