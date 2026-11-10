@@ -1,6 +1,6 @@
 # SaaS Current Development Progress
 
-更新时间：`2026-08-01`
+更新时间：`2026-09-07`
 
 ## 文档职责
 
@@ -15,8 +15,29 @@
 | MAIN-100 | `awaiting_legacy_authorization`，本地、external provider 与 Legacy read-only plan coverage 已闭合；真实 cutover 未获授权前不能标记 complete |
 | 本地/production-style 产品闭环 | 自助注册与个人工作区、登录、Recovery、邀请、成员、Seed/Assets/Graph、single-current-world、Character、Writer/Reviewer、显式 adoption、manuscript/export 已有当前 live/browser 证据 |
 | 中央集成 | 产品 handlers/workers 已进入中央 auth/RBAC/CSRF/RLS/limiter/readiness 安全壳 |
-| Compose | 全服务 health、31 migrations readiness、持久化 restart/recovery、worker queues 当前通过 |
+| Compose | 全服务 health、32 migrations readiness、持久化 restart/recovery、worker queues 当前通过 |
+| 作品书架与 Writer 入口 | `UI-2026-09-07` 为 `verified_current`；真实隔离 Go API + Next BFF 的 17 项浏览器验收通过 |
 | 当前未完成 | 唯一 Legacy 候选尚未获授权为真实业务数据；apply/verify/rollback/final cutover 尚未执行 |
+
+## 2026-09-07 作品书架与入口交互精修
+
+`48-workspace-ui-polish.md` 的书架 → 创建/进入作品 → Writer 切片已闭合。保留纸墨与线装书视觉，完整书名横排、URL 搜索恢复、创建对话框、账户菜单和移动导航键盘行为已落地。作品链接通过真实 membership 初始化项目上下文，覆盖新标签与直接 Writer 地址；创建失败保留真实服务错误和登录恢复入口。
+
+浏览器复核关闭了 Writer 窄屏顶栏控件重叠、首段编辑多插入换行、Agent 输入框从隐藏布局恢复后高度塌陷，以及键盘退出失败提示随菜单失焦消失的问题。正文输入、保存、视图切换与刷新后保持一致；画布与 Agent 的既有主次关系保持。
+
+隔离栈同时补齐当前 Go 1.25 构建、先建 runtime role 再授权、migration 0032 的 runner-owned ledger/sentinel，以及 `--app` 启动 readiness 所需 worker 的条件。本轮验证：Web `124 passed, 1 skipped`、typecheck、production build；infra 定向 `59 passed`；真实 Chrome 在 375/768/1024/1440px 完成 `17 passed`、零 page errors，覆盖真实认证/CSRF、创建与保存、键盘、API 中断恢复和会话撤销。所有测试写入均经过 disposable runner，退出后的容器、volumes 和网络已确认清理。
+
+当前证据为 [验收报告](../../tools/ui-preview/shots/workspace-2026-09-07/report.json) 与同目录桌面/手机截图，执行入口为 `tools/ui-preview/verify-workspace-live.mjs`。本地 Web 使用忽略于 Git 的 `infra/.env` 中 `WEB_PORT=4000`，避开另一项目占用的 3999 端口。
+
+本轮关闭 R2 中的移动 drawer focus trap；R2 其余 retry/idempotency 与分页边界仍按原任务推进。MAIN-100 的真实 Legacy 授权 gate 和 Z7 provider 全旅程未在本次 UI 验收中执行。
+
+## 2026-08-01 完整审查修复（本轮）
+
+`47-complete-audit-2026-08-01.md` 的当前可落地项已执行：Legacy 兼容服务仅本机绑定，生产样式 Legacy API 在无管理密钥时 fail-closed；`/api/v2` LLM 路由改为路由级管理认证；资产更新/删除强制 scope；CORS 收敛为显式 Origin 且不回显 PNA；LLM provider URL 限制 HTTPS/allowlist/公网地址；上传采用请求体与流式双重大小边界；step trace ID 拒绝路径分隔符；Go App DB 按 DSN 复用共享池（20 open / 10 idle）；所有会话 Cookie 统一应用 `ForceSecureSessionCookies`；领域错误不再把驱动文本写入响应。
+
+SaaS 注册在 production 或显式 `MIROFISH_REQUIRE_EMAIL_VERIFICATION=1` 时进入一次性邮箱挑战流程：挑战记录只保存 token hash，验证前不创建 user/credential/session，消费后原子创建个人工作区；冲突响应统一为通用 202 语义。schema/readiness 已推进至 `32:0032_email_verification`。当前仍不宣称 complete 的边界是 Go 端全路径 project 授权/RLS 的进一步集中化、Legacy Writer 直接 splice 的确认/回滚收口，以及唯一 real Legacy cutover 授权 gate。
+
+本轮验证：Go `go test ./...`、Legacy 全套 `841 passed, 5 skipped`、Legacy 定向 `62 passed`、Agent Runtime workflow monitor `7 passed`、`git diff --check` 均通过；Starlette `1.3.1`、pgx `5.9.2`、x/crypto `0.52.0` 已锁定。
 
 ## 2026-07-31 上线前缺陷审查修复
 
@@ -44,7 +65,7 @@ Focused 证据：Go API full、Pi Runtime `138 passed, 4 skipped` + typecheck/bu
 
 `44-full-module-bug-audit.md` 四个梯队中的确认缺陷已全部闭合，误报保持否决。除第一梯队的采纳权限、写入口 RBAC、goal-start 单活跃与 Writer autosave 外，本轮完成真实库 RLS、workflow attempt fencing、Worldline 失败终态、Pi payload/cast 幂等、LLM capability fail-closed、蒸馏失败指纹重试、上传流式限额、协作 owner 不变量、Temporal/Compose 与 DB/HTTP 资源边界等修复。逐条状态与边界见审计文档 §7。
 
-readiness 真相源已更新至 `31:0031_asset_distillation_retryable_fingerprint`。隔离 `mirofish_test_*` + `mirofish.live_test=on` 栈中 migration/sentinel 与 assetdistillation/collaboration/workflows/worldline/traces/sourcefiles app-role live 全绿，退出执行 `down -v`；`infra/tests` full 为 `72 passed`。Go full、Python `504 passed, 31 skipped`、Pi `133 passed, 4 skipped` + typecheck/build、Web `92 passed, 1 skipped` + typecheck/build 均通过。真实隔离 Go API 镜像 `/healthz` 返回 ok、直连 `/v1/me` 401；当前 Next Web 连接该 API 后 `/login` 200、同源 `/api/me` 401，未使用 stub/mock。该审计收口不改变 MAIN-100 `awaiting_legacy_authorization` 状态。
+readiness 真相源已更新至 `32:0032_email_verification`。隔离 `mirofish_test_*` + `mirofish.live_test=on` 栈中 migration/sentinel 与 assetdistillation/collaboration/workflows/worldline/traces/sourcefiles app-role live 全绿，退出执行 `down -v`；`infra/tests` full 为 `72 passed`。Go full、Python `504 passed, 31 skipped`、Pi `133 passed, 4 skipped` + typecheck/build、Web `92 passed, 1 skipped` + typecheck/build 均通过。真实隔离 Go API 镜像 `/healthz` 返回 ok、直连 `/v1/me` 401；当前 Next Web 连接该 API 后 `/login` 200、同源 `/api/me` 401，未使用 stub/mock。该审计收口不改变 MAIN-100 `awaiting_legacy_authorization` 状态。
 
 本地 completion audit 已闭合：Coverage Matrix 当前为 `90 verified / 25 verified replacement / 5 explicit non-restored / 1 blocked`，无裸 `planned` / `implemented` / `in_progress` / `pending` 表格状态；Production/Ops 四行已按当前 billing、object storage、recovery、audit 证据校准，并由语义防漂移测试约束。external HTTPS provider 的真实成功证书已升级为 `verified`；机械状态归一化不得改写 `seed.stage.pending` 等真实代码标识的防回归测试也已通过。唯一 blocked row 为 real Legacy source，不能用 synthetic legacy fixture 替代。
 
@@ -112,7 +133,7 @@ readiness 真相源已更新至 `31:0031_asset_distillation_retryable_fingerprin
 ## Compose / Recovery 证据
 
 - `/readyz` exact GET 返回 Postgres/schema、Redis、Temporal/required pollers、object storage 四依赖 `ready`。
-- migration ledger 目标为 `31:0031_asset_distillation_retryable_fingerprint`；readiness 常量同步要求 31。Compose bootstrap 校验至 0031，包含 0028 worldline lock/canon、0029 asset search trigger、0030 `writer_thread_messages UPDATE=true / DELETE=false` 权限，以及 0031 failed/cancelled fingerprint 可重试 sentinel；早期 migration sentinel 继续保留。
+- migration ledger 目标为 `32:0032_email_verification`；readiness 常量同步要求 32。Compose bootstrap 校验至 0032，包含 0028 worldline lock/canon、0029 asset search trigger、0030 `writer_thread_messages UPDATE=true / DELETE=false` 权限、0031 failed/cancelled fingerprint 可重试 sentinel，以及 0032 pending email verification challenge；早期 migration sentinel 继续保留。
 - 本地 fixture 清理器默认 preview、仅 `--apply` 删除固定 UUID + 精确 marker 的 allowlist，拒绝非 local/远程数据库、拒绝 libpq query 路由覆盖并保护管理员个人工作区；管理员的正常多设备会话不在清理范围。当前库清理后为 `1 user / 1 workspace / 1 project / 1 session`，测试 source/workflow 为 0，正式 LLM channel/model/binding 保持 `1 / 50 / 26`。
 - 后续 live/E2E fixture 不再复用主库：`run-live-test-stack.sh` 为每次任务创建独立 Compose project、`mirofish_test_*` 数据库、live-test marker 和 volumes，退出统一 `down -v`；Go/Python/Web guard 会在写 fixture 前拒绝主 `mirofish` 库。历史清理器只保留为一次性旧污染收敛工具。
 - recovery 私表对 `mirofish_app` 的 direct grants 当前为 `0`。

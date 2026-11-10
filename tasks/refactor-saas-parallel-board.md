@@ -1,6 +1,6 @@
 # Refactor SaaS Active Goal Board
 
-更新时间：`2026-07-31`
+更新时间：`2026-09-07`
 
 ## 规则
 
@@ -33,7 +33,8 @@
 | Z-028 | `in_progress` | current | Z0–Z6 `connected` + disposable app-role live 与 Pi local-provider live 2/2；2026-07-27 隔离真实 Go API + Next Web/BFF 启动通过；Z7 仍缺 authenticated zero-start desktop/mobile browser journey |
 | AUDIT-044 | `verified_current` | current | 四个梯队确认缺陷全部修复；误报保持否决；ledger/readiness 至 31；六包隔离 app-role live 与四 runtime full regression 通过 |
 | AUDIT-2026-07-31 | `fixed_verified` | current | 上线前世界线/Writer recall 审查：timeline 全局截断、admission 引用校验、state_changes 丢失、optimistic turn 幽灵消息、picker 吞错/N+1、live shelf 硬编码凭据已修复；focused Go/Pi/Web 验证通过，见 doc 25 §9 |
-| AUDIT-2026-07-31-R2 | `in_progress` | current | doc 46 的 3 个 BLOCKER 与 archive-memory 同族读路径已修复；M-A1–A8、M-P1–P4、M-I1–I5、signup/recovery/invite、Redis/SMTP fail-closed 与 Python retry 边界已落地，Go/Python/Pi/Web/infra 回归和生产 build 通过。仍待 M-S3 邮箱验证、其余 Python workflow 同族 retry/idempotency、Worldline 其余列表与 collections 显式分页、移动 drawer focus trap 等，Recovery UI 已补齐，未标记 complete |
+| AUDIT-2026-07-31-R2 | `in_progress` | current | doc 46 的 3 个 BLOCKER 与 archive-memory 同族读路径已修复；M-A1–A8、M-P1–P4、M-I1–I5、signup/recovery/invite、Redis/SMTP fail-closed 与 Python retry 边界已落地，Go/Python/Pi/Web/infra 回归和生产 build 通过。邮箱验证已落地并推进 readiness 至 migration 32；Recovery UI 已补齐，移动 drawer focus trap 已由 UI-2026-09-07 真实浏览器补证。其余 Python workflow 同族 retry/idempotency、Worldline 其余列表与 collections 显式分页仍待，未标记 complete |
+| UI-2026-09-07 | `verified_current` | current | doc 48 书架、搜索、创建、新标签/直达与移动导航闭合；Writer 顶栏、首段换行、输入框显隐和退出失败焦点已修复。Web 124 passed/1 skipped + typecheck/build、infra 59 passed、隔离 Go API + Next BFF 浏览器 17 passed，截图与报告位于 tools/ui-preview/shots/workspace-2026-09-07/ |
 
 ## 当前证据
 
@@ -46,6 +47,7 @@
 7. Legacy relationship-owned evidence 兼容映射已修复；三个候选项目 plan 均 `complete` / zero blockers，deterministic replay 与公开报告 privacy scan 通过。
 8. 2026-07-26 写作台 rail 历史重建（P6-003-A）：task 回合按 `run_id` 从持久 thread + durable 事件流重建，采用后 SettledCard 保留步骤/召回/散文/「查看正文」（跨章闪烁定位）；采用落库与编辑器手工改稿分别在同事务写/清 `writer_thread_messages.metadata_jsonb.adopted`；`useWriterRun` 跟踪草稿权威 status；`writer-turns` 纯函数 8 项 node:test 通过。
 9. 2026-07-27 全模块审计：四个梯队确认缺陷全部 `fixed_verified` / `verified_by_design`；迁移/readiness 已至 `31:0031`。六包隔离 app-role live、Go/Python/Pi/Web full 与 infra `72 passed` 通过；不替代 Legacy 授权 gate。
+10. 2026-09-07 UI：四种视口、真实登录/创建/正文保存、键盘焦点、API 中断恢复和会话撤销共 17 项通过，零 page errors；disposable 容器/volumes/网络已清理，本地 Web 端口为 4000。验证与设计范围见 doc 48 和唯一进度入口。
 
 ## Next Gate
 
