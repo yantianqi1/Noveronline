@@ -81,3 +81,9 @@ apps/web/next-env.d.ts
 
 # 后端本地数据库（不入库，靠 alembic 重建）
 backend/data/
+
+# ── learned coding-taste preferences ─────────────────────────────────────────
+# Written by the dsh-taste plugin and by Command Code. These files can contain
+# host names, IP addresses, account formats, and credential descriptions.
+.dsh-taste/
+.commandcode/
