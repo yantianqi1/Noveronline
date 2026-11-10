@@ -1,303 +1,86 @@
-/*
- * Shelf book — a standing thread-bound volume (线装书) on the workspace shelf.
- *
- * Scoped to app/workspace; class prefix `shelf-book`. The six cover palettes
- * (`shelf-book--0` … `shelf-book--5`) are assigned deterministically by
- * project id in project-card.tsx. All texture is pure CSS: cloth weave from
- * repeating gradients, page edges from stepped stripes, depth from layered
- * inset shadows. No images.
- *
- * Shared size contract with the shelf board: the book is intrinsically sized
- * at width clamp(8.75rem, 11vw, 10.5rem) with aspect-ratio 5/7, and the shelf
- * row bottom-aligns it with flex `items-end`.
- */
-
+/* Six stable cloth covers, inherited from the existing paper-and-ink shelf. */
 .shelf-book {
-  /* Cover palette — these are the 瓷青 (shelf-book--0) values as defaults. */
   --sb-cover: #38606a;
   --sb-cover-deep: #25454e;
   --sb-thread: rgba(233, 226, 205, 0.55);
   --sb-frame: rgba(233, 226, 205, 0.3);
-  --sb-on-cover: #efe7d2;
-  --sb-on-cover-dim: rgba(239, 231, 210, 0.64);
-
   position: relative;
   display: block;
-  width: clamp(8.75rem, 11vw, 10.5rem);
+  width: 100%;
+  max-width: 168px;
   aspect-ratio: 5 / 7;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  appearance: none;
-  cursor: pointer;
-  font: inherit;
-  text-align: inherit;
-  color: var(--sb-on-cover);
-  background:
-    repeating-linear-gradient(0deg, rgba(255, 253, 248, 0.028) 0 1px, transparent 1px 4px),
-    repeating-linear-gradient(90deg, rgba(20, 16, 10, 0.05) 0 1px, transparent 1px 4px),
-    linear-gradient(155deg, var(--sb-cover) 0%, var(--sb-cover-deep) 100%);
   border-radius: 3px 7px 7px 3px;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 253, 248, 0.09),
-    inset 4px 0 7px -3px rgba(20, 16, 10, 0.35),
-    inset -1px 0 1px rgba(255, 253, 248, 0.07),
-    0 1px 1px rgba(23, 26, 27, 0.14),
-    0 12px 20px -10px rgba(23, 26, 27, 0.38);
-  transform-origin: 50% 100%;
-  transition: box-shadow var(--duration-med) var(--ease-paper);
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 253, 248, 0.025) 0 1px, transparent 1px 4px),
+    repeating-linear-gradient(90deg, rgba(20, 16, 10, 0.04) 0 1px, transparent 1px 4px),
+    linear-gradient(155deg, var(--sb-cover), var(--sb-cover-deep));
+  box-shadow: inset 4px 0 7px -3px rgba(20, 16, 10, 0.35), var(--shadow-lift);
+  transition: transform var(--duration-med) var(--ease-paper), box-shadow var(--duration-med) var(--ease-paper);
 }
 
-.shelf-book:hover {
-  box-shadow:
-    inset 0 1px 0 rgba(255, 253, 248, 0.11),
-    inset 4px 0 7px -3px rgba(20, 16, 10, 0.35),
-    inset -1px 0 1px rgba(255, 253, 248, 0.09),
-    0 2px 2px rgba(23, 26, 27, 0.16),
-    0 26px 36px -14px rgba(23, 26, 27, 0.5);
-}
-
-.shelf-book:active {
-  box-shadow:
-    inset 0 1px 0 rgba(255, 253, 248, 0.08),
-    inset 4px 0 7px -3px rgba(20, 16, 10, 0.35),
-    0 1px 1px rgba(23, 26, 27, 0.16),
-    0 7px 14px -8px rgba(23, 26, 27, 0.42);
-}
-
-/* ── Cover palettes — classic thread-bound cloth colours ─────────────────
- * shelf-book--0 (瓷青) is the base rule above; the rest override it. */
-.shelf-book--1 {
-  /* 墨绿 */
-  --sb-cover: #33523f;
-  --sb-cover-deep: #21392b;
-}
-
-.shelf-book--2 {
-  /* 赭石 */
-  --sb-cover: #7c4e2c;
-  --sb-cover-deep: #5a391f;
-}
-
-.shelf-book--3 {
-  /* 绛朱 */
-  --sb-cover: #81302a;
-  --sb-cover-deep: #5e211b;
-}
-
-.shelf-book--4 {
-  /* 玄墨 */
-  --sb-cover: #2d2d32;
-  --sb-cover-deep: #1b1b1f;
-}
-
+.shelf-book--1 { --sb-cover: #33523f; --sb-cover-deep: #21392b; }
+.shelf-book--2 { --sb-cover: #7c4e2c; --sb-cover-deep: #5a391f; }
+.shelf-book--3 { --sb-cover: #81302a; --sb-cover-deep: #5e211b; }
+.shelf-book--4 { --sb-cover: #2d2d32; --sb-cover-deep: #1b1b1f; }
 .shelf-book--5 {
-  /* 宣纸米白 — light cover, ink furniture */
   --sb-cover: #f3ebd8;
   --sb-cover-deep: #e2d6bb;
   --sb-thread: rgba(60, 58, 54, 0.5);
   --sb-frame: rgba(60, 58, 54, 0.34);
-  --sb-on-cover: var(--color-ink-soft);
-  --sb-on-cover-dim: rgba(60, 58, 54, 0.74);
 }
 
-/* ── Top page block (书口) ─────────────────────────────────────────────── */
 .shelf-book-pages {
   position: absolute;
-  top: 0;
-  right: 0;
-  left: 0.85rem;
+  inset: 0 0 auto 0.85rem;
   height: 0.42rem;
-  background: repeating-linear-gradient(180deg, #f6efdc 0 1px, #dcd0b2 1px 2px);
   border-radius: 0 7px 0 0;
-  box-shadow:
-    0 1px 2px rgba(23, 26, 27, 0.3),
-    inset 0 -1px 1px rgba(86, 69, 45, 0.35);
-  pointer-events: none;
+  background: repeating-linear-gradient(180deg, var(--color-panel) 0 1px, var(--color-paper-deep) 1px 2px);
+  box-shadow: 0 1px 2px rgba(23, 26, 27, 0.3);
 }
 
-/* ── Spine thickness band (书脊) ───────────────────────────────────────── */
 .shelf-book-spine {
   position: absolute;
   inset: 0 auto 0 0;
   width: 0.85rem;
-  background: linear-gradient(
-    90deg,
-    rgba(20, 16, 10, 0.34),
-    rgba(20, 16, 10, 0.14) 60%,
-    rgba(255, 253, 248, 0.05)
-  );
   border-right: 1px solid rgba(20, 16, 10, 0.24);
   border-radius: 3px 0 0 3px;
-  pointer-events: none;
+  background: linear-gradient(90deg, rgba(20, 16, 10, 0.34), rgba(20, 16, 10, 0.14) 60%, rgba(255, 253, 248, 0.05));
 }
 
-/* ── Printed cover frame, double rule ──────────────────────────────────── */
-.shelf-book-frame {
-  position: absolute;
-  inset: 0.7rem 1.05rem 0.7rem 1.35rem;
-  border: 1px solid var(--sb-frame);
-  border-radius: 1px;
-  pointer-events: none;
-}
+.shelf-book-frame { position: absolute; inset: 0.7rem 1.05rem 0.7rem 1.35rem; border: 1px solid var(--sb-frame); }
+.shelf-book-frame::before { content: ""; position: absolute; inset: 2px; border: 1px solid var(--sb-frame); }
+.shelf-book-binding { position: absolute; top: 0.9rem; right: 0.6rem; bottom: 0.9rem; width: 2px; background: repeating-linear-gradient(180deg, var(--sb-thread) 0 6px, transparent 6px 11px); }
 
-.shelf-book-frame::before {
-  content: "";
-  position: absolute;
-  inset: 2px;
-  border: 1px solid var(--sb-frame);
-  border-radius: 1px;
-}
-
-/* ── Binding thread, stitched down the right edge (装订线) ─────────────── */
-.shelf-book-binding {
-  position: absolute;
-  top: 0.9rem;
-  right: 0.6rem;
-  bottom: 0.9rem;
-  width: 2px;
-  background: repeating-linear-gradient(180deg, var(--sb-thread) 0 6px, transparent 6px 11px);
-  pointer-events: none;
-}
-
-.shelf-book-binding::after {
-  /* the thread wrapping around the outer edge */
-  content: "";
-  position: absolute;
-  top: -0.35rem;
-  right: -0.28rem;
-  bottom: -0.35rem;
-  width: 1px;
-  background: linear-gradient(
-    180deg,
-    transparent,
-    var(--sb-thread) 12%,
-    var(--sb-thread) 88%,
-    transparent
-  );
-}
-
-/* ── Vertical title slip (题签) ────────────────────────────────────────── */
 .shelf-book-label {
   position: absolute;
   top: 1.15rem;
   right: 1.5rem;
-  padding: 0.5rem 0.42rem;
-  background:
-    repeating-linear-gradient(45deg, rgba(86, 69, 45, 0.03) 0 2px, transparent 2px 5px),
-    linear-gradient(180deg, #fbf5e6, #f3ead2);
-  border-radius: 1px;
-  box-shadow:
-    0 1px 3px rgba(20, 16, 10, 0.3),
-    inset 0 0 0 1px rgba(86, 69, 45, 0.3);
+  max-height: calc(100% - 2.3rem);
+  padding: 0.6rem 0.45rem;
+  background: var(--color-panel);
+  box-shadow: var(--shadow-hairline);
   writing-mode: vertical-rl;
-  pointer-events: none;
 }
 
+/* The cover title is ornamental. The complete accessible name lives below it. */
 .shelf-book-title {
   display: block;
   max-height: 7em;
   overflow: hidden;
-  font-family: var(--font-serif);
-  font-size: var(--text-md);
-  font-weight: 600;
-  line-height: 1.25;
-  letter-spacing: 0.12em;
-  color: var(--color-ink);
-  mask-image: linear-gradient(180deg, #000 70%, transparent 100%);
-  -webkit-mask-image: linear-gradient(180deg, #000 70%, transparent 100%);
-}
-
-/* ── Role seal (印章) ──────────────────────────────────────────────────── */
-.shelf-book-seal {
-  position: absolute;
-  bottom: 1rem;
-  left: 1.5rem;
-  display: grid;
-  place-items: center;
-  width: 1.75rem;
-  height: 1.75rem;
-  font-size: 8.5px;
-  font-weight: 600;
-  line-height: 1;
-  letter-spacing: 0.04em;
-  writing-mode: vertical-rl;
-  border-radius: 3px;
-  pointer-events: none;
-}
-
-.shelf-book-seal--vermilion {
-  background: linear-gradient(160deg, var(--color-accent), var(--color-accent-strong));
-  color: #fdeedd;
-  box-shadow:
-    inset 0 0 0 1px rgba(253, 238, 221, 0.32),
-    inset 0 0 5px rgba(20, 16, 10, 0.28),
-    0 1px 2px rgba(20, 16, 10, 0.3);
-}
-
-.shelf-book-seal--ink {
-  background: linear-gradient(160deg, #35322c, #232019);
-  color: #ece0c4;
-  box-shadow:
-    inset 0 0 0 1px rgba(236, 224, 196, 0.28),
-    inset 0 0 5px rgba(20, 16, 10, 0.32),
-    0 1px 2px rgba(20, 16, 10, 0.3);
-}
-
-/* ── Tenant name, small print beside the seal ──────────────────────────── */
-.shelf-book-tenant {
-  position: absolute;
-  right: 1.2rem;
-  bottom: 1.15rem;
-  max-width: 42%;
-  overflow: hidden;
-  font-size: var(--text-caption);
-  line-height: var(--text-caption--line-height);
-  color: var(--sb-on-cover-dim);
-  text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
-  pointer-events: none;
+  font-family: var(--font-serif);
+  font-size: var(--text-md);
+  line-height: var(--text-md--line-height);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--color-ink);
 }
 
-/* ── Hover slip — a paper tag peeking out of the top edge ──────────────── */
-.shelf-book-tab {
-  position: absolute;
-  bottom: calc(100% - 0.4rem);
-  left: 50%;
-  padding: 0.34rem 0.6rem 0.42rem;
-  background: linear-gradient(180deg, var(--color-panel), var(--color-paper-deep));
-  border-radius: 3px 3px 0 0;
-  box-shadow:
-    0 -2px 6px rgba(23, 26, 27, 0.18),
-    inset 0 0 0 1px rgba(86, 69, 45, 0.18);
-  color: var(--color-accent-strong);
-  font-size: var(--text-caption);
-  line-height: var(--text-caption--line-height);
-  white-space: nowrap;
-  opacity: 0;
-  transform: translate(-50%, 0.35rem);
-  transition:
-    transform var(--duration-med) var(--ease-paper),
-    opacity var(--duration-med) var(--ease-paper);
-  pointer-events: none;
+@media (hover: hover) {
+  .shelf-project:hover .shelf-book { transform: translateY(-1px); box-shadow: inset 4px 0 7px -3px rgba(20, 16, 10, 0.35), var(--shadow-panel); }
 }
-
-.shelf-book:hover .shelf-book-tab,
-.shelf-book:focus-visible .shelf-book-tab {
-  opacity: 1;
-  transform: translate(-50%, -0.3rem);
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .shelf-book {
-    transition: none;
-  }
-
-  .shelf-book-tab,
-  .shelf-book:hover .shelf-book-tab,
-  .shelf-book:focus-visible .shelf-book-tab {
-    transform: translate(-50%, 0);
-    transition: opacity 120ms ease-out;
-  }
+  .shelf-book { transition: none; }
+  .shelf-project:hover .shelf-book { transform: none; }
 }

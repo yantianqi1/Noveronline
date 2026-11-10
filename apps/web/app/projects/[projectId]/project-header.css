@@ -1,0 +1,53 @@
+/* Match the existing wide (1200px) and stack (861px) layout bands. */
+@media (max-width: 1199px) {
+  .project-header-inner {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    height: auto;
+    min-height: 56px;
+    gap: 4px 8px;
+    padding-block: 6px;
+    padding-inline: 16px;
+  }
+
+  #project-topbar-slot,
+  .writer-canvas-top,
+  .writer-save-controls { display: contents; }
+
+  .writer-chapter-controls { grid-column: 2; grid-row: 1; }
+  .writer-chapter-trigger { min-height: 44px; }
+
+  .writer-view-tabs { grid-column: 1 / -1; grid-row: 2; width: 100%; }
+  .writer-view-tabs > button { flex: 1; min-height: 44px; font-size: var(--text-base); }
+
+  .writer-word-count,
+  .writer-status-divider,
+  .writer-new-chapter-label { display: none; }
+
+  .writer-new-chapter {
+    grid-column: 3;
+    grid-row: 1;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .writer-save-feedback {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    justify-self: end;
+    max-width: 100%;
+    padding-block: 2px;
+  }
+  .writer-save-feedback > span { max-width: 100%; }
+  .writer-save-feedback [role="alert"] > span:last-child { white-space: normal; overflow-wrap: anywhere; }
+
+  .writer-chapter-list { right: 0; left: auto; max-width: calc(100vw - 32px); }
+}
+
+@media (max-width: 860px) {
+  .writer-book-title,
+  .writer-chapter-divider { display: none; }
+}

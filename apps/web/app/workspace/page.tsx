@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 
 import { WorkspaceShelf } from "./workspace-shelf";
 
@@ -12,5 +13,5 @@ export const metadata: Metadata = {
  * through the BFF; this file is just the route entry.
  */
 export default function WorkspacePage() {
-  return <WorkspaceShelf />;
+  return <Suspense><WorkspaceShelf /></Suspense>;
 }

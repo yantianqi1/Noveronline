@@ -19,7 +19,7 @@ const STORAGE_KEY = "mirofish.nav-rail.collapsed";
  * hidden, icons carry tooltips) so the workbench content gets the width back;
  * the choice persists in localStorage. Pure navigation chrome — no data fetching.
  */
-export function WorkbenchNav({ projectId }: { projectId: string }) {
+export function WorkbenchNav({ projectId, collapsible = true }: { projectId: string; collapsible?: boolean }) {
   const pathname = usePathname();
   const base = `/projects/${projectId}`;
   // Start expanded to match the server render, then reconcile with the saved
@@ -28,12 +28,13 @@ export function WorkbenchNav({ projectId }: { projectId: string }) {
   const navRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
+    if (!collapsible) return;
     try {
       setCollapsed(window.localStorage.getItem(STORAGE_KEY) === "1");
     } catch {
       // storage unavailable — stay expanded
     }
-  }, []);
+  }, [collapsible]);
 
   // Keep the wrapping <aside>'s width in sync with the collapsed state. The
   // aside lives in the server layout (so the rail stays the only client
@@ -61,7 +62,7 @@ export function WorkbenchNav({ projectId }: { projectId: string }) {
     <nav
       ref={navRef}
       aria-label="工作台导航"
-      className={cn("flex h-full flex-col gap-1", collapsed ? "px-2" : "px-3")}
+      className={cn("flex flex-col gap-1", collapsible && "h-full", collapsed ? "px-2" : "px-3")}
     >
       <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto">
         {WORKBENCH_SECTIONS.map((section) => {
@@ -77,7 +78,7 @@ export function WorkbenchNav({ projectId }: { projectId: string }) {
               title={collapsed ? section.label : undefined}
               aria-label={collapsed ? section.label : undefined}
               className={cn(
-                "group relative flex items-center rounded-panel py-2.5 text-sm transition-colors duration-200",
+                "group relative flex min-h-11 items-center rounded-panel py-2.5 text-sm transition-colors duration-200",
                 collapsed ? "justify-center px-0" : "gap-3 px-3.5",
                 active
                   ? "bg-accent-wash font-medium text-accent-strong"
@@ -106,7 +107,7 @@ export function WorkbenchNav({ projectId }: { projectId: string }) {
       </div>
 
       {/* Collapse toggle — pinned to the rail's foot. */}
-      <button
+      {collapsible ? <button
         type="button"
         onClick={toggle}
         aria-expanded={!collapsed}
@@ -125,7 +126,7 @@ export function WorkbenchNav({ projectId }: { projectId: string }) {
             <span className="text-sm">收起</span>
           </>
         )}
-      </button>
+      </button> : null}
     </nav>
   );
 }

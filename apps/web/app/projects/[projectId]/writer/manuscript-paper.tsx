@@ -171,7 +171,7 @@ function splitLeadingHeading(text: string): { heading: string | null; prefix: st
 
 /** Re-join an edited body under its lifted heading (one blank line after `# …`). */
 function joinUnderHeading(prefix: string, next: string): string {
-  return next && !prefix.endsWith("\n") ? `${prefix}\n\n${next}` : prefix + next;
+  return prefix && next && !prefix.endsWith("\n") ? `${prefix}\n\n${next}` : prefix + next;
 }
 
 /** One editable paragraph-block within the continuous sheet. */

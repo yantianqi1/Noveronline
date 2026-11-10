@@ -63,9 +63,23 @@ export function WriterComposer({
   useEffect(() => {
     const area = areaRef.current;
     if (!area) return;
-    area.style.height = "0px";
-    area.style.height = `${Math.min(area.scrollHeight, 132)}px`;
-  }, [value]);
+    const resize = () => {
+      if (!area.clientWidth) return;
+      area.style.height = "0px";
+      area.style.height = `${Math.min(area.scrollHeight, 132)}px`;
+    };
+    let width = area.clientWidth;
+    resize();
+    // The dock can mount hidden on phones. Measure again when it becomes
+    // visible or changes width; height-only changes must not loop.
+    const observer = new ResizeObserver(() => {
+      if (area.clientWidth === width) return;
+      width = area.clientWidth;
+      resize();
+    });
+    observer.observe(area);
+    return () => observer.disconnect();
+  }, [value, placeholder]);
 
   const filtered = (worldlineOptions ?? []).filter((option) => {
     if (!mention) return false;
