@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -46,21 +47,66 @@ import (
 )
 
 const (
-	appDatabaseMaxOpenConnections  = 1
+	appDatabaseMaxOpenConnections  = 20
+	appDatabaseMaxIdleConnections  = 10
 	authDatabaseMaxOpenConnections = 8
 	authDatabaseMaxIdleConnections = 4
 )
 
+var appDatabasePool = struct {
+	sync.Mutex
+	byURL map[string]*sql.DB
+	refs  map[*sql.DB]int
+}{byURL: make(map[string]*sql.DB), refs: make(map[*sql.DB]int)}
+
 func openAppDatabase(databaseURL string) (*sql.DB, error) {
+	databaseURL = strings.TrimSpace(databaseURL)
+	appDatabasePool.Lock()
+	defer appDatabasePool.Unlock()
+	if db := appDatabasePool.byURL[databaseURL]; db != nil && appDatabasePool.refs[db] > 0 {
+		// Reusing the DSN's pool keeps independently assembled stores from
+		// multiplying Postgres sessions.
+		appDatabasePool.refs[db]++
+		return db, nil
+	}
 	db, err := sql.Open("pgx", databaseURL)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(appDatabaseMaxOpenConnections)
-	db.SetMaxIdleConns(0)
+	db.SetMaxIdleConns(appDatabaseMaxIdleConnections)
 	db.SetConnMaxIdleTime(time.Minute)
 	db.SetConnMaxLifetime(30 * time.Minute)
+	appDatabasePool.byURL[databaseURL] = db
+	appDatabasePool.refs[db] = 1
 	return db, nil
+}
+
+func closeAppDatabase(db *sql.DB) error {
+	if db == nil {
+		return nil
+	}
+	appDatabasePool.Lock()
+	if refs, ok := appDatabasePool.refs[db]; ok {
+		if refs > 1 {
+			appDatabasePool.refs[db] = refs - 1
+			appDatabasePool.Unlock()
+			return nil
+		}
+		delete(appDatabasePool.refs, db)
+		for databaseURL, candidate := range appDatabasePool.byURL {
+			if candidate == db {
+				delete(appDatabasePool.byURL, databaseURL)
+				break
+			}
+		}
+	}
+	appDatabasePool.Unlock()
+	return db.Close()
+}
+
+func appDatabaseCloser(db *sql.DB) func() error {
+	return func() error { return closeAppDatabase(db) }
 }
 
 func openAuthDatabase(databaseURL string) (*sql.DB, error) {
@@ -1079,6 +1125,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("configure platform handlers: %v", err)
 	}
+	var emailVerificationSender func(context.Context, registration.EmailVerificationChallenge) error
+	if parseBoolEnv(os.Getenv("MIROFISH_ENABLE_SELF_SIGNUP")) && emailVerificationRequired(os.Getenv("MIROFISH_DEPLOYMENT_ENV"), os.Getenv("MIROFISH_REQUIRE_EMAIL_VERIFICATION")) {
+		emailVerificationSender, err = configuredEmailVerificationSender()
+		if err != nil {
+			log.Fatalf("configure email verification sender: %v", err)
+		}
+		if emailVerificationSender == nil {
+			log.Fatal("email verification sender is required when self-service signup is enabled")
+		}
+	}
 	if closePlatformHandlers != nil {
 		defer func() {
 			if err := closePlatformHandlers(); err != nil {
@@ -1130,6 +1186,7 @@ func main() {
 		PasswordAuthenticator:            passwordAuthenticator,
 		PasswordChanger:                  passwordChanger,
 		RegistrationService:              registrationService,
+		EmailVerificationSender:          emailVerificationSender,
 		AuthSessionStore:                 authSessionStore,
 		Authorizer:                       centralAuthorizer,
 		WriterStarter:                    writerStarter,
@@ -1259,7 +1316,14 @@ func withSessionAuthSecret(config httpapi.Config) httpapi.Config {
 		os.Getenv("MIROFISH_ENABLE_DEVELOPMENT_AUTH"),
 	)
 	config.AllowSelfSignup = parseBoolEnv(os.Getenv("MIROFISH_ENABLE_SELF_SIGNUP"))
+	config.RequireEmailVerification = emailVerificationRequired(
+		os.Getenv("MIROFISH_DEPLOYMENT_ENV"), os.Getenv("MIROFISH_REQUIRE_EMAIL_VERIFICATION"),
+	)
 	return config
+}
+
+func emailVerificationRequired(deploymentEnvironment, explicitlyEnabled string) bool {
+	return isProductionLike(deploymentEnvironment) || parseBoolEnv(explicitlyEnabled)
 }
 
 func developmentAuthAllowed(deploymentEnvironment string, enabled string) bool {
@@ -1425,7 +1489,7 @@ func newWriterPlanningStarter(
 	store := writerplanning.NewSQLStore(db)
 	return writerplanning.NewTemporalStarter(writerplanning.TemporalConfig{
 		Client: temporalClient, Store: store, TaskQueue: taskQueue,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newAssetDistillationHandler(
@@ -1457,7 +1521,7 @@ func newAssetDistillationHandler(
 		Authorizer: authorizer, GraphRebuild: bundle.graphRebuild,
 	})
 	bundle.handler = handler
-	return bundle, db.Close, nil
+	return bundle, appDatabaseCloser(db), nil
 }
 
 type assetDistillationBundle struct {
@@ -1572,7 +1636,7 @@ func newWriterWorkspaceHandler(databaseURL string, authorizer auth.Authorizer, p
 		Authorizer: writerWorkspaceAuthorizer{base: authorizer}, OwnerLookup: store,
 		Planning: planning,
 	})
-	return handler, db.Close, nil
+	return handler, appDatabaseCloser(db), nil
 }
 
 func newManuscriptWorkspaceHandlers(
@@ -1611,7 +1675,7 @@ func newManuscriptWorkspaceHandlers(
 		Exporter: exporter, States: store, Artifacts: artifactStore,
 		Authorizer: authorizer, ActorResolver: mountedActorResolver{},
 	})
-	return workspaceHandler, downloadHandler, db.Close, nil
+	return workspaceHandler, downloadHandler, appDatabaseCloser(db), nil
 }
 
 type assetCatalogSecurityHandler struct {
@@ -1678,7 +1742,7 @@ func newAssetCatalogHandler(databaseURL string, authorizer auth.Authorizer) (htt
 	}
 	return assetCatalogSecurityHandler{
 		next: assetcatalog.NewHandler(assetcatalog.NewSQLStore(db)), authorizer: authorizer,
-	}, db.Close, nil
+	}, appDatabaseCloser(db), nil
 }
 
 type mountedCSRFVerifier struct{}
@@ -1723,7 +1787,7 @@ func newPlatformHandlers(
 		return nil, nil, nil, nil, nil, nil, err
 	}
 	fail := func(err error) (http.Handler, http.Handler, http.Handler, http.Handler, *authrecovery.DeliveryDispatcher, func() error, error) {
-		_ = db.Close()
+		_ = closeAppDatabase(db)
 		return nil, nil, nil, nil, nil, nil, err
 	}
 
@@ -1780,7 +1844,7 @@ func newPlatformHandlers(
 		Store: llmStore, Access: llmadmin.NewSQLAccessController(db), ActorResolver: mountedActorResolver{},
 		Health: healthService, Metrics: metrics, RateLimiter: rateLimiter,
 	})
-	return recoveryHandler, collaborationHandler, projectAdminHandler, llmAdminHandler, recoveryDispatcher, db.Close, nil
+	return recoveryHandler, collaborationHandler, projectAdminHandler, llmAdminHandler, recoveryDispatcher, appDatabaseCloser(db), nil
 }
 
 func newRecoveryTokenCipher(deploymentEnvironment string, encodedKey string) (*authrecovery.TokenCipher, error) {
@@ -1842,6 +1906,36 @@ func configuredSMTPNotifiers() (authrecovery.ResetNotifier, collaboration.Invita
 	return recoveryNotifier, invitationNotifier, nil
 }
 
+func configuredEmailVerificationSender() (func(context.Context, registration.EmailVerificationChallenge) error, error) {
+	baseURL := strings.TrimSpace(os.Getenv("AUTH_EMAIL_VERIFICATION_BASE_URL"))
+	if baseURL == "" {
+		return nil, nil
+	}
+	host := strings.TrimSpace(os.Getenv("SMTP_HOST"))
+	portValue := strings.TrimSpace(os.Getenv("SMTP_PORT"))
+	username := strings.TrimSpace(os.Getenv("SMTP_USERNAME"))
+	password := strings.TrimSpace(os.Getenv("SMTP_PASSWORD"))
+	from := strings.TrimSpace(os.Getenv("SMTP_FROM"))
+	tlsMode := strings.TrimSpace(os.Getenv("SMTP_TLS_MODE"))
+	port, err := strconv.Atoi(portValue)
+	if err != nil || port <= 0 || host == "" || username == "" || password == "" || from == "" || tlsMode == "" {
+		return nil, errors.New("SMTP email verification configuration is incomplete")
+	}
+	notifier, err := authrecovery.NewSMTPNotifier(authrecovery.SMTPNotifierConfig{
+		Host: host, Port: port, Username: username, Password: password, From: from,
+		VerificationBaseURL: baseURL, TLSMode: tlsMode,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, challenge registration.EmailVerificationChallenge) error {
+		_, err := notifier.SendEmailVerification(ctx, authrecovery.EmailVerificationDelivery{
+			Email: challenge.Email, Token: challenge.Token, ExpiresAt: challenge.ExpiresAt,
+		})
+		return err
+	}, nil
+}
+
 func startAuthRecoveryDispatcher(dispatcher *authrecovery.DeliveryDispatcher) {
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
@@ -1867,7 +1961,7 @@ func newAuthReader(databaseURL string) (auth.Reader, func() error, error) {
 	}
 	return auth.NewSQLReader(auth.SQLReaderConfig{
 		Queryer: auth.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newPasswordAuthenticator(databaseURL string) (auth.PasswordAuthenticator, func() error, error) {
@@ -1882,7 +1976,7 @@ func newPasswordAuthenticator(databaseURL string) (auth.PasswordAuthenticator, f
 	return auth.NewSQLPasswordAuthenticator(auth.SQLPasswordAuthenticatorConfig{
 		Queryer: queryer,
 		Reader:  auth.NewSQLReader(auth.SQLReaderConfig{Queryer: queryer}),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newPasswordChanger(databaseURL string) (auth.PasswordChanger, func() error, error) {
@@ -1897,7 +1991,7 @@ func newPasswordChanger(databaseURL string) (auth.PasswordChanger, func() error,
 	return auth.NewSQLPasswordChanger(auth.SQLPasswordChangerConfig{
 		Queryer: queryer,
 		Execer:  queryer,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newAuthSessionStore(databaseURL string) (auth.SessionStore, func() error, error) {
@@ -1912,7 +2006,7 @@ func newAuthSessionStore(databaseURL string) (auth.SessionStore, func() error, e
 	return auth.NewSQLSessionStore(auth.SQLSessionStoreConfig{
 		Queryer: queryer,
 		Execer:  queryer,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newTemporalStarters(
@@ -2007,7 +2101,7 @@ func newWriterAdmissionStore(databaseURL string) (workflows.WriterAdmissionStore
 	return workflows.NewSQLWriterAdmissionStore(workflows.SQLWriterAdmissionStoreConfig{
 		Execer: workflows.NewSQLDBWriterAdmissionExecer(db),
 		DB:     db,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWriterThreadStore(databaseURL string) (workflows.WriterThreadStore, func() error, error) {
@@ -2018,7 +2112,7 @@ func newWriterThreadStore(databaseURL string) (workflows.WriterThreadStore, func
 	if err != nil {
 		return nil, nil, err
 	}
-	return workflows.NewSQLWriterThreadStore(db), db.Close, nil
+	return workflows.NewSQLWriterThreadStore(db), appDatabaseCloser(db), nil
 }
 
 func newDraftAdoptionStore(databaseURL string) (workflows.DraftAdoptionStore, func() error, error) {
@@ -2032,7 +2126,7 @@ func newDraftAdoptionStore(databaseURL string) (workflows.DraftAdoptionStore, fu
 	// Outbox hook is attached after asset distillation store is available (see wireDraftAdoptionOutbox).
 	return workflows.NewSQLDraftAdoptionStore(workflows.SQLDraftAdoptionStoreConfig{
 		Queryer: workflows.NewSQLDBWriterDraftAdoptionQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func attachDraftAdoptionOutbox(store workflows.DraftAdoptionStore, hook workflows.DraftAdoptionOutboxHook) {
@@ -2052,7 +2146,7 @@ func newDraftReviewStore(databaseURL string) (workflows.DraftReviewStore, func()
 	return workflows.NewSQLDraftReviewStore(workflows.SQLDraftReviewStoreConfig{
 		Execer:  workflows.NewSQLDBWriterAdmissionExecer(db),
 		Queryer: workflows.NewSQLDBWriterEventQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newDraftReviewRuntimeStores(databaseURL string) (
@@ -2068,7 +2162,7 @@ func newDraftReviewRuntimeStores(databaseURL string) (
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return workflows.NewSQLDraftReviewRuntimeStore(db), workflows.NewSQLDraftReviewIssueStore(db), db.Close, nil
+	return workflows.NewSQLDraftReviewRuntimeStore(db), workflows.NewSQLDraftReviewIssueStore(db), appDatabaseCloser(db), nil
 }
 
 func newSeedAdmissionStore(databaseURL string) (workflows.SeedAdmissionStore, func() error, error) {
@@ -2081,7 +2175,7 @@ func newSeedAdmissionStore(databaseURL string) (workflows.SeedAdmissionStore, fu
 	}
 	return workflows.NewSQLSeedAdmissionStore(workflows.SQLSeedAdmissionStoreConfig{
 		Execer: workflows.NewSQLDBWriterAdmissionExecer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newAnalysisAdmissionStore(databaseURL string) (workflows.AnalysisAdmissionStore, func() error, error) {
@@ -2095,7 +2189,7 @@ func newAnalysisAdmissionStore(databaseURL string) (workflows.AnalysisAdmissionS
 	return workflows.NewSQLAnalysisAdmissionStore(workflows.SQLAnalysisAdmissionStoreConfig{
 		Execer: workflows.NewSQLDBWriterAdmissionExecer(db),
 		DB:     db,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newAnalysisReaders(databaseURL string) (
@@ -2126,7 +2220,7 @@ func newAnalysisReaders(databaseURL string) (
 		workflows.NewSQLAnalysisWorkspaceReader(workflows.SQLAnalysisWorkspaceReaderConfig{Queryer: queryer}),
 		workflows.NewSQLAnalysisCandidateReader(workflows.SQLAnalysisCandidateReaderConfig{Queryer: queryer}),
 		workflows.NewSQLAnalysisAssetImporter(db),
-		db.Close,
+		appDatabaseCloser(db),
 		nil
 }
 
@@ -2150,7 +2244,7 @@ func newAssetIngestionAdmissionStore(databaseURL string) (workflows.AssetIngesti
 	}
 	return workflows.NewSQLAssetIngestionAdmissionStore(workflows.SQLAssetIngestionAdmissionStoreConfig{
 		Execer: workflows.NewSQLDBWriterAdmissionExecer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newStyleExtractionAdmissionStore(databaseURL string) (workflows.StyleExtractionAdmissionStore, func() error, error) {
@@ -2163,7 +2257,7 @@ func newStyleExtractionAdmissionStore(databaseURL string) (workflows.StyleExtrac
 	}
 	return workflows.NewSQLStyleExtractionAdmissionStore(workflows.SQLStyleExtractionAdmissionStoreConfig{
 		Execer: workflows.NewSQLDBWriterAdmissionExecer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newAssetReindexAdmissionStore(databaseURL string) (workflows.AssetReindexAdmissionStore, func() error, error) {
@@ -2176,7 +2270,7 @@ func newAssetReindexAdmissionStore(databaseURL string) (workflows.AssetReindexAd
 	}
 	return workflows.NewSQLAssetReindexAdmissionStore(workflows.SQLAssetReindexAdmissionStoreConfig{
 		Execer: workflows.NewSQLDBWriterAdmissionExecer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newStoryGraphBuildAdmissionStore(databaseURL string) (workflows.StoryGraphBuildAdmissionStore, func() error, error) {
@@ -2189,7 +2283,7 @@ func newStoryGraphBuildAdmissionStore(databaseURL string) (workflows.StoryGraphB
 	}
 	return workflows.NewSQLStoryGraphBuildAdmissionStore(workflows.SQLStoryGraphBuildAdmissionStoreConfig{
 		Execer: workflows.NewSQLDBWriterAdmissionExecer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newStoryGraphBondGenerationAdmissionStore(databaseURL string) (workflows.StoryGraphBondGenerationAdmissionStore, func() error, error) {
@@ -2202,7 +2296,7 @@ func newStoryGraphBondGenerationAdmissionStore(databaseURL string) (workflows.St
 	}
 	return workflows.NewSQLStoryGraphBondGenerationAdmissionStore(workflows.SQLStoryGraphBondGenerationAdmissionStoreConfig{
 		Execer: workflows.NewSQLDBWriterAdmissionExecer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWriterReader(databaseURL string) (workflows.WriterReader, func() error, error) {
@@ -2215,7 +2309,7 @@ func newWriterReader(databaseURL string) (workflows.WriterReader, func() error, 
 	}
 	return workflows.NewSQLWriterReader(workflows.SQLWriterReaderConfig{
 		Queryer: workflows.NewSQLDBWriterEventQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newManuscriptReader(databaseURL string) (workflows.ManuscriptReader, func() error, error) {
@@ -2228,7 +2322,7 @@ func newManuscriptReader(databaseURL string) (workflows.ManuscriptReader, func()
 	}
 	return workflows.NewSQLManuscriptReader(workflows.SQLManuscriptReaderConfig{
 		Queryer: workflows.NewSQLDBWriterEventQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newManuscriptArtifactExporter(databaseURL string) (workflows.ManuscriptArtifactExporter, func() error, error) {
@@ -2241,7 +2335,7 @@ func newManuscriptArtifactExporter(databaseURL string) (workflows.ManuscriptArti
 	}
 	return workflows.NewSQLManuscriptArtifactExporter(workflows.SQLManuscriptArtifactExporterConfig{
 		Queryer: workflows.NewSQLDBWriterEventQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorkflowReader(databaseURL string) (workflows.WorkflowReader, func() error, error) {
@@ -2254,7 +2348,7 @@ func newWorkflowReader(databaseURL string) (workflows.WorkflowReader, func() err
 	}
 	return workflows.NewSQLWorkflowReader(workflows.SQLWorkflowReaderConfig{
 		Queryer: workflows.NewSQLDBWriterEventQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorkflowEventReader(databaseURL string) (workflows.WorkflowEventReader, func() error, error) {
@@ -2267,7 +2361,7 @@ func newWorkflowEventReader(databaseURL string) (workflows.WorkflowEventReader, 
 	}
 	return workflows.NewSQLWorkflowEventReader(workflows.SQLWorkflowEventReaderConfig{
 		Queryer: workflows.NewSQLDBWriterEventQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newSeedRunReader(databaseURL string) (workflows.SeedRunReader, func() error, error) {
@@ -2280,7 +2374,7 @@ func newSeedRunReader(databaseURL string) (workflows.SeedRunReader, func() error
 	}
 	return workflows.NewSQLSeedRunReader(workflows.SQLSeedRunReaderConfig{
 		Queryer: workflows.NewSQLDBWriterEventQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newProjectReadinessReader(databaseURL string) (projectreadiness.Reader, func() error, error) {
@@ -2293,7 +2387,7 @@ func newProjectReadinessReader(databaseURL string) (projectreadiness.Reader, fun
 	}
 	return projectreadiness.NewSQLReader(projectreadiness.SQLReaderConfig{
 		Queryer: projectreadiness.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newProjectOverviewReader(databaseURL string) (projectoverview.Reader, func() error, error) {
@@ -2306,7 +2400,7 @@ func newProjectOverviewReader(databaseURL string) (projectoverview.Reader, func(
 	}
 	return projectoverview.NewSQLReader(projectoverview.SQLReaderConfig{
 		Queryer: projectoverview.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newStoryGraphReader(databaseURL string) (storygraph.Reader, func() error, error) {
@@ -2319,7 +2413,7 @@ func newStoryGraphReader(databaseURL string) (storygraph.Reader, func() error, e
 	}
 	return storygraph.NewSQLReader(storygraph.SQLReaderConfig{
 		Queryer: storygraph.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newStoryGraphCandidateAdoptionStore(databaseURL string) (storygraph.CandidateAdoptionStore, func() error, error) {
@@ -2332,7 +2426,7 @@ func newStoryGraphCandidateAdoptionStore(databaseURL string) (storygraph.Candida
 	}
 	return storygraph.NewSQLCandidateAdoptionStore(storygraph.SQLCandidateAdoptionStoreConfig{
 		Queryer: storygraph.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorldlineSavedPathReader(databaseURL string) (worldline.SavedPathReader, func() error, error) {
@@ -2345,7 +2439,7 @@ func newWorldlineSavedPathReader(databaseURL string) (worldline.SavedPathReader,
 	}
 	return worldline.NewSQLSavedPathReader(worldline.SQLSavedPathReaderConfig{
 		Queryer: worldline.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorldlineSavedPathStore(databaseURL string) (worldline.SavedPathStore, func() error, error) {
@@ -2360,7 +2454,7 @@ func newWorldlineSavedPathStore(databaseURL string) (worldline.SavedPathStore, f
 	return worldline.NewSQLSavedPathStore(worldline.SQLSavedPathStoreConfig{
 		Queryer: queryer,
 		Execer:  queryer,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorldlineSessionStore(databaseURL string) (worldline.SessionStarter, worldline.SessionReader, func() error, error) {
@@ -2376,7 +2470,7 @@ func newWorldlineSessionStore(databaseURL string) (worldline.SessionStarter, wor
 		Queryer: queryer,
 		Execer:  queryer,
 	})
-	return store, store, db.Close, nil
+	return store, store, appDatabaseCloser(db), nil
 }
 
 func newWorldlineStepStarter(temporalClient worldline.TemporalWorkflowClient, databaseURL string, taskQueue string) (worldline.StepStarter, func() error, error) {
@@ -2392,7 +2486,7 @@ func newWorldlineStepStarter(temporalClient worldline.TemporalWorkflowClient, da
 		Execer:    queryer,
 		Client:    temporalClient,
 		TaskQueue: taskQueue,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorldlineAutoEvolutionStarter(
@@ -2411,7 +2505,7 @@ func newWorldlineAutoEvolutionStarter(
 		Store:     worldline.NewSQLAutoEvolutionAdmissionStore(db),
 		Client:    temporalClient,
 		TaskQueue: taskQueue,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorldlinePreparationStore(databaseURL string) (worldline.PreparationStore, func() error, error) {
@@ -2426,7 +2520,7 @@ func newWorldlinePreparationStore(databaseURL string) (worldline.PreparationStor
 	return worldline.NewSQLPreparationStore(worldline.SQLPreparationStoreConfig{
 		Queryer: queryer,
 		Execer:  queryer,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorldlinePreparationStarter(
@@ -2445,7 +2539,7 @@ func newWorldlinePreparationStarter(
 		Store:     worldline.NewSQLPreparationAdmissionStore(db),
 		Client:    temporalClient,
 		TaskQueue: taskQueue,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorldlineGoalStartStarter(
@@ -2464,7 +2558,7 @@ func newWorldlineGoalStartStarter(
 		Store:     worldline.NewSQLGoalStartAdmissionStore(db),
 		Client:    temporalClient,
 		TaskQueue: taskQueue,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorldlineGoalStartReader(databaseURL string) (worldline.GoalStartReader, func() error, error) {
@@ -2477,7 +2571,7 @@ func newWorldlineGoalStartReader(databaseURL string) (worldline.GoalStartReader,
 	}
 	return worldline.NewSQLGoalStartReader(worldline.SQLGoalStartReaderConfig{
 		Queryer: worldline.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorldlineTimelineReader(databaseURL string) (worldline.TimelineReader, func() error, error) {
@@ -2490,7 +2584,7 @@ func newWorldlineTimelineReader(databaseURL string) (worldline.TimelineReader, f
 	}
 	return worldline.NewSQLTimelineReader(worldline.SQLTimelineReaderConfig{
 		Queryer: worldline.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorldlineEventReader(databaseURL string) (worldline.EventReader, func() error, error) {
@@ -2503,7 +2597,7 @@ func newWorldlineEventReader(databaseURL string) (worldline.EventReader, func() 
 	}
 	return worldline.NewSQLEventReader(worldline.SQLEventReaderConfig{
 		Queryer: worldline.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorldlineEventAdoptionStore(databaseURL string) (worldline.EventAdoptionStore, func() error, error) {
@@ -2516,7 +2610,7 @@ func newWorldlineEventAdoptionStore(databaseURL string) (worldline.EventAdoption
 	}
 	return worldline.NewSQLEventAdoptionStore(worldline.SQLEventAdoptionStoreConfig{
 		Queryer: worldline.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorldlineEventRejectionStore(databaseURL string) (worldline.EventRejectionStore, func() error, error) {
@@ -2529,7 +2623,7 @@ func newWorldlineEventRejectionStore(databaseURL string) (worldline.EventRejecti
 	}
 	return worldline.NewSQLEventRejectionStore(worldline.SQLEventRejectionStoreConfig{
 		Queryer: worldline.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorldlineEventMutationStore(databaseURL string) (worldline.EventMutationStore, func() error, error) {
@@ -2542,7 +2636,7 @@ func newWorldlineEventMutationStore(databaseURL string) (worldline.EventMutation
 	}
 	return worldline.NewSQLEventMutationStore(worldline.SQLEventMutationStoreConfig{
 		Queryer: worldline.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorldlineVariableStore(databaseURL string) (worldline.VariableStore, func() error, error) {
@@ -2557,7 +2651,7 @@ func newWorldlineVariableStore(databaseURL string) (worldline.VariableStore, fun
 	return worldline.NewSQLVariableStore(worldline.SQLVariableStoreConfig{
 		Queryer: queryer,
 		Execer:  queryer,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newCharacterConsoleStore(databaseURL string) (characterconsole.Store, func() error, error) {
@@ -2572,7 +2666,7 @@ func newCharacterConsoleStore(databaseURL string) (characterconsole.Store, func(
 	return characterconsole.NewSQLStore(characterconsole.SQLStoreConfig{
 		Queryer: queryer,
 		Execer:  queryer,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newCharacterProposalStore(databaseURL string) (characterconsole.ProposalStore, func() error, error) {
@@ -2583,7 +2677,7 @@ func newCharacterProposalStore(databaseURL string) (characterconsole.ProposalSto
 	if err != nil {
 		return nil, nil, err
 	}
-	return characterconsole.NewSQLProposalStore(db, 100), db.Close, nil
+	return characterconsole.NewSQLProposalStore(db, 100), appDatabaseCloser(db), nil
 }
 
 func newCharacterDialogueStarter(
@@ -2602,7 +2696,7 @@ func newCharacterDialogueStarter(
 		Client:         temporalClient,
 		TaskQueue:      taskQueue,
 		AdmissionStore: workflows.NewSQLCharacterDialogueAdmissionStore(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorkflowCanceller(temporalClient workflows.TemporalWorkflowClient, databaseURL string) (workflows.WorkflowCanceller, func() error, error) {
@@ -2620,7 +2714,7 @@ func newWorkflowCanceller(temporalClient workflows.TemporalWorkflowClient, datab
 	return workflows.NewTemporalWorkflowCanceller(workflows.TemporalWorkflowCancellerConfig{
 		Client: temporalClient,
 		Store:  store,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWorkflowRetrier(temporalClient workflows.TemporalWorkflowClient, databaseURL string, seedTaskQueue string) (workflows.WorkflowRetrier, func() error, error) {
@@ -2639,7 +2733,7 @@ func newWorkflowRetrier(temporalClient workflows.TemporalWorkflowClient, databas
 		Client:    temporalClient,
 		Store:     store,
 		TaskQueue: seedTaskQueue,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newSeedSegmentRetrier(
@@ -2658,7 +2752,7 @@ func newSeedSegmentRetrier(
 		Execer:    workflows.NewSQLDBWriterAdmissionExecer(db),
 		Client:    temporalClient,
 		TaskQueue: seedTaskQueue,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newSourceFileStore(databaseURL string) (sourcefiles.Store, func() error, error) {
@@ -2676,7 +2770,7 @@ func newSourceFileStore(databaseURL string) (sourcefiles.Store, func() error, er
 	return sourcefiles.NewSQLStore(sourcefiles.SQLStoreConfig{
 		Queryer:        sourcefiles.NewSQLDBQueryer(db),
 		ObjectVerifier: objectVerifier,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 type assetReaderBundle struct {
@@ -2708,7 +2802,7 @@ func newAssetReaderBundle(databaseURL string) (assetReaderBundle, func() error, 
 		}),
 		QueryEmbeddingResolver: resolver,
 		SearchIndexChecker:     baseReader,
-	}, db.Close, nil
+	}, appDatabaseCloser(db), nil
 }
 
 func newLLMQuotaStore(databaseURL string) (llm.QuotaPolicyStore, func() error, error) {
@@ -2719,7 +2813,7 @@ func newLLMQuotaStore(databaseURL string) (llm.QuotaPolicyStore, func() error, e
 	if err != nil {
 		return nil, nil, err
 	}
-	return llm.NewSQLQuotaStore(db), db.Close, nil
+	return llm.NewSQLQuotaStore(db), appDatabaseCloser(db), nil
 }
 
 func newArchiveMemoryReader(databaseURL string) (assets.ArchiveMemoryReader, func() error, error) {
@@ -2732,7 +2826,7 @@ func newArchiveMemoryReader(databaseURL string) (assets.ArchiveMemoryReader, fun
 	}
 	return assets.NewSQLArchiveMemoryReader(assets.SQLArchiveMemoryReaderConfig{
 		Queryer: assets.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newArchiveMemoryReviewStore(databaseURL string) (assets.ArchiveMemoryReviewStore, func() error, error) {
@@ -2745,7 +2839,7 @@ func newArchiveMemoryReviewStore(databaseURL string) (assets.ArchiveMemoryReview
 	}
 	return assets.NewSQLArchiveMemoryReviewStore(assets.SQLArchiveMemoryReviewStoreConfig{
 		Queryer: assets.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newAssetAdoptionStore(databaseURL string) (assets.AdoptionStore, func() error, error) {
@@ -2758,7 +2852,7 @@ func newAssetAdoptionStore(databaseURL string) (assets.AdoptionStore, func() err
 	}
 	return assets.NewSQLAdoptionStore(assets.SQLAdoptionStoreConfig{
 		Queryer: assets.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newAssetMutationStore(databaseURL string) (assets.MutationStore, func() error, error) {
@@ -2771,7 +2865,7 @@ func newAssetMutationStore(databaseURL string) (assets.MutationStore, func() err
 	}
 	return assets.NewSQLMutationStore(assets.SQLMutationStoreConfig{
 		Queryer: assets.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newAssetBulkActionStore(databaseURL string) (assets.BulkActionStore, func() error, error) {
@@ -2784,7 +2878,7 @@ func newAssetBulkActionStore(databaseURL string) (assets.BulkActionStore, func()
 	}
 	return assets.NewSQLBulkActionStore(assets.SQLBulkActionStoreConfig{
 		Queryer: assets.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newAssetIngestionReader(databaseURL string) (workflows.AssetIngestionReader, func() error, error) {
@@ -2798,7 +2892,7 @@ func newAssetIngestionReader(databaseURL string) (workflows.AssetIngestionReader
 	workflowReader := workflows.NewSQLWorkflowReader(workflows.SQLWorkflowReaderConfig{
 		Queryer: workflows.NewSQLDBWriterEventQueryer(db),
 	})
-	return workflows.NewWorkflowAssetIngestionReader(workflowReader), db.Close, nil
+	return workflows.NewWorkflowAssetIngestionReader(workflowReader), appDatabaseCloser(db), nil
 }
 
 func newStyleExtractionReader(databaseURL string) (workflows.StyleExtractionReader, func() error, error) {
@@ -2812,7 +2906,7 @@ func newStyleExtractionReader(databaseURL string) (workflows.StyleExtractionRead
 	workflowReader := workflows.NewSQLWorkflowReader(workflows.SQLWorkflowReaderConfig{
 		Queryer: workflows.NewSQLDBWriterEventQueryer(db),
 	})
-	return workflows.NewWorkflowStyleExtractionReader(workflowReader), db.Close, nil
+	return workflows.NewWorkflowStyleExtractionReader(workflowReader), appDatabaseCloser(db), nil
 }
 
 func newObjectVerifierFromEnv() (sourcefiles.ObjectVerifier, error) {
@@ -2881,7 +2975,7 @@ func newLLMResolver(databaseURL string) (llm.Resolver, func() error, error) {
 	}
 	return llm.NewSQLResolver(llm.SQLResolverConfig{
 		Queryer: llm.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newLLMBindingStore(databaseURL string) (llm.BindingStore, func() error, error) {
@@ -2894,7 +2988,7 @@ func newLLMBindingStore(databaseURL string) (llm.BindingStore, func() error, err
 	}
 	return llm.NewSQLBindingStore(llm.SQLBindingStoreConfig{
 		Queryer: llm.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newLLMCatalogReader(databaseURL string) (llm.CatalogReader, func() error, error) {
@@ -2907,7 +3001,7 @@ func newLLMCatalogReader(databaseURL string) (llm.CatalogReader, func() error, e
 	}
 	return llm.NewSQLCatalogReader(llm.SQLCatalogConfig{
 		Queryer: llm.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newLLMChannelStore(databaseURL string, credentialKey string) (llm.ChannelStore, func() error, error) {
@@ -2921,7 +3015,7 @@ func newLLMChannelStore(databaseURL string, credentialKey string) (llm.ChannelSt
 	return llm.NewSQLChannelStore(llm.SQLChannelStoreConfig{
 		Queryer:               llm.NewSQLDBQueryer(db),
 		CredentialKeyMaterial: credentialKey,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newLLMModelSyncer(databaseURL string, credentialKey string) (llm.ModelSyncer, func() error, error) {
@@ -2935,7 +3029,7 @@ func newLLMModelSyncer(databaseURL string, credentialKey string) (llm.ModelSynce
 	return llm.NewSQLModelSyncer(llm.SQLModelSyncerConfig{
 		Queryer:               llm.NewSQLDBQueryer(db),
 		CredentialKeyMaterial: credentialKey,
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newLLMSettingsReader(databaseURL string) (llm.SettingsReader, func() error, error) {
@@ -2948,7 +3042,7 @@ func newLLMSettingsReader(databaseURL string) (llm.SettingsReader, func() error,
 	}
 	return llm.NewSQLSettingsReader(llm.SQLSettingsReaderConfig{
 		Queryer: llm.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newLLMTelemetryReader(databaseURL string) (llm.TelemetryReader, func() error, error) {
@@ -2961,7 +3055,7 @@ func newLLMTelemetryReader(databaseURL string) (llm.TelemetryReader, func() erro
 	}
 	return llm.NewSQLTelemetryReader(llm.SQLTelemetryConfig{
 		Queryer: llm.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newTraceReader(databaseURL string) (traces.Reader, func() error, error) {
@@ -2974,7 +3068,7 @@ func newTraceReader(databaseURL string) (traces.Reader, func() error, error) {
 	}
 	return traces.NewSQLReader(traces.SQLReaderConfig{
 		Queryer: traces.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newTraceExportAuditor(databaseURL string) (traces.ExportAuditor, func() error, error) {
@@ -2987,7 +3081,7 @@ func newTraceExportAuditor(databaseURL string) (traces.ExportAuditor, func() err
 	}
 	return traces.NewSQLExportAuditor(traces.SQLExportAuditorConfig{
 		Queryer: traces.NewSQLDBQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }
 
 func newWriterEventReader(databaseURL string) (workflows.WriterEventReader, func() error, error) {
@@ -3000,5 +3094,5 @@ func newWriterEventReader(databaseURL string) (workflows.WriterEventReader, func
 	}
 	return workflows.NewSQLWriterEventReader(workflows.SQLWriterEventReaderConfig{
 		Queryer: workflows.NewSQLDBWriterEventQueryer(db),
-	}), db.Close, nil
+	}), appDatabaseCloser(db), nil
 }

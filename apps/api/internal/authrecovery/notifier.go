@@ -13,11 +13,11 @@ import (
 )
 
 type SMTPNotifierConfig struct {
-	Host                                   string
-	Port                                   int
-	Username, Password, From, ResetBaseURL string
-	TLSMode                                string
-	RootCAs                                *x509.CertPool
+	Host                                                        string
+	Port                                                        int
+	Username, Password, From, ResetBaseURL, VerificationBaseURL string
+	TLSMode                                                     string
+	RootCAs                                                     *x509.CertPool
 }
 type SMTPNotifier struct{ config SMTPNotifierConfig }
 
@@ -28,10 +28,20 @@ const (
 )
 
 func NewSMTPNotifier(config SMTPNotifierConfig) (*SMTPNotifier, error) {
-	if strings.TrimSpace(config.Host) == "" || config.Port <= 0 || strings.TrimSpace(config.Username) == "" || strings.TrimSpace(config.Password) == "" || strings.TrimSpace(config.From) == "" || strings.TrimSpace(config.ResetBaseURL) == "" || strings.TrimSpace(config.TLSMode) == "" {
+	if strings.TrimSpace(config.Host) == "" || config.Port <= 0 || strings.TrimSpace(config.Username) == "" || strings.TrimSpace(config.Password) == "" || strings.TrimSpace(config.From) == "" || (strings.TrimSpace(config.ResetBaseURL) == "" && strings.TrimSpace(config.VerificationBaseURL) == "") || strings.TrimSpace(config.TLSMode) == "" {
 		return nil, &AppError{Code: CodeBackendUnavailable, Message: "SMTP password recovery is not configured"}
 	}
-	if err := validatePublicURL(config.ResetBaseURL); err != nil {
+	if config.ResetBaseURL != "" {
+		if err := validatePublicURL(config.ResetBaseURL); err != nil {
+			return nil, &AppError{Code: CodeValidationFailed, Message: "password reset URL is invalid"}
+		}
+	}
+	if config.VerificationBaseURL != "" {
+		if err := validatePublicURL(config.VerificationBaseURL); err != nil {
+			return nil, &AppError{Code: CodeValidationFailed, Message: "email verification URL is invalid"}
+		}
+	}
+	if config.ResetBaseURL == "" && config.VerificationBaseURL == "" {
 		return nil, &AppError{Code: CodeValidationFailed, Message: "password reset URL is invalid"}
 	}
 	if config.TLSMode != SMTPModeImplicitTLS && config.TLSMode != SMTPModeStartTLS && (config.TLSMode != SMTPModeLoopbackPlaintext || !isLoopbackHost(config.Host)) {
@@ -40,23 +50,31 @@ func NewSMTPNotifier(config SMTPNotifierConfig) (*SMTPNotifier, error) {
 	return &SMTPNotifier{config: config}, nil
 }
 func (n *SMTPNotifier) SendPasswordReset(ctx context.Context, input ResetDelivery) (DeliveryReceipt, error) {
-	resetURL, err := url.Parse(n.config.ResetBaseURL)
+	return n.sendLink(ctx, n.config.ResetBaseURL, input.Email, input.Token, "MiroFish Novel password reset")
+}
+
+func (n *SMTPNotifier) SendEmailVerification(ctx context.Context, input EmailVerificationDelivery) (DeliveryReceipt, error) {
+	return n.sendLink(ctx, n.config.VerificationBaseURL, input.Email, input.Token, "MiroFish Novel email verification")
+}
+
+func (n *SMTPNotifier) sendLink(ctx context.Context, baseURL, recipient, token, subject string) (DeliveryReceipt, error) {
+	link, err := url.Parse(baseURL)
 	if err != nil {
 		return DeliveryReceipt{}, err
 	}
-	query := resetURL.Query()
-	query.Set("token", input.Token)
-	resetURL.RawQuery = query.Encode()
-	message := []byte("To: " + input.Email + "\r\nFrom: " + n.config.From + "\r\nSubject: MiroFish Novel password reset\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nReset your password: " + resetURL.String() + "\r\n")
+	query := link.Query()
+	query.Set("token", token)
+	link.RawQuery = query.Encode()
+	message := []byte("To: " + recipient + "\r\nFrom: " + n.config.From + "\r\nSubject: " + subject + "\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nOpen this link: " + link.String() + "\r\n")
 	address := net.JoinHostPort(n.config.Host, strconv.Itoa(n.config.Port))
 	if n.config.TLSMode == SMTPModeImplicitTLS {
-		return DeliveryReceipt{}, n.sendTLS(ctx, address, input.Email, message)
+		return DeliveryReceipt{}, n.sendTLS(ctx, address, recipient, message)
 	}
 	if n.config.TLSMode == SMTPModeStartTLS {
-		return DeliveryReceipt{}, n.sendSTARTTLS(ctx, address, input.Email, message)
+		return DeliveryReceipt{}, n.sendSTARTTLS(ctx, address, recipient, message)
 	}
-	if err := smtp.SendMail(address, nil, n.config.From, []string{input.Email}, message); err != nil {
-		return DeliveryReceipt{}, fmt.Errorf("SMTP password reset delivery failed: %w", err)
+	if err := smtp.SendMail(address, nil, n.config.From, []string{recipient}, message); err != nil {
+		return DeliveryReceipt{}, fmt.Errorf("SMTP email delivery failed: %w", err)
 	}
 	return DeliveryReceipt{}, nil
 }

@@ -9,6 +9,8 @@ import (
 const (
 	CodeValidationFailed    = "VALIDATION_FAILED"
 	CodeEmailConflict       = "REGISTRATION_EMAIL_CONFLICT"
+	CodeVerificationInvalid = "REGISTRATION_VERIFICATION_INVALID"
+	CodeVerificationExpired = "REGISTRATION_VERIFICATION_EXPIRED"
 	CodeBackendUnconfigured = "REGISTRATION_BACKEND_UNCONFIGURED"
 	CodeRegistrationFailed  = "REGISTRATION_FAILED"
 )
@@ -27,6 +29,24 @@ type InitialSession struct {
 }
 
 type InitialSessionFactory func(userID string) (InitialSession, error)
+
+type EmailVerificationStartInput struct {
+	DisplayName  string
+	Email        string
+	Password     string
+	ProjectTitle string
+}
+
+type EmailVerificationChallenge struct {
+	Email     string
+	Token     string
+	ExpiresAt time.Time
+}
+
+type EmailVerificationInput struct {
+	Token                 string
+	InitialSessionFactory InitialSessionFactory
+}
 
 type UserSummary struct {
 	UserID      string `json:"user_id"`

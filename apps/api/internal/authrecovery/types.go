@@ -40,6 +40,11 @@ type ResetDelivery struct {
 	ExpiresAt                  time.Time
 }
 type DeliveryReceipt struct{ ProviderMessageID string }
+type EmailVerificationDelivery struct {
+	Email     string
+	Token     string
+	ExpiresAt time.Time
+}
 type ResetNotifier interface {
 	SendPasswordReset(context.Context, ResetDelivery) (DeliveryReceipt, error)
 }

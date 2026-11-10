@@ -25,8 +25,8 @@ const (
 	temporalPollerWorkers   = 4
 	temporalPollerAttempts  = 2
 	temporalPollerRetryWait = 25 * time.Millisecond
-	latestRequiredMigration = "0031_asset_distillation_retryable_fingerprint"
-	requiredMigrationCount  = 31
+	latestRequiredMigration = "0032_email_verification"
+	requiredMigrationCount  = 32
 )
 
 type productionReadinessConfig struct {
@@ -97,7 +97,7 @@ func newProductionReadinessChecker(config productionReadinessConfig) (httpapi.Re
 		if openErr != nil {
 			return fail(errors.New("readiness postgres configuration is invalid"))
 		}
-		closers = append(closers, db.Close)
+		closers = append(closers, appDatabaseCloser(db))
 		probes = append(probes, readinessProbe{name: "postgres", check: postgresReadinessProbe(db, requiredMigration, config.RequiredMigrationCount)})
 	}
 

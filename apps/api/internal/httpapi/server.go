@@ -41,11 +41,13 @@ type Config struct {
 	SessionAuthSecret                string
 	AllowDevelopmentAuth             bool
 	AllowSelfSignup                  bool
+	RequireEmailVerification         bool
 	ForceSecureSessionCookies        bool
 	AuthReader                       auth.Reader
 	PasswordAuthenticator            auth.PasswordAuthenticator
 	PasswordChanger                  auth.PasswordChanger
 	RegistrationService              RegistrationService
+	EmailVerificationSender          func(context.Context, registration.EmailVerificationChallenge) error
 	AuthSessionStore                 auth.SessionStore
 	Authorizer                       auth.Authorizer
 	WriterStarter                    workflows.WriterStarter
@@ -166,6 +168,11 @@ type RegistrationService interface {
 	Register(context.Context, registration.RegisterInput) (registration.Result, error)
 }
 
+type EmailVerificationService interface {
+	StartEmailVerification(context.Context, registration.EmailVerificationStartInput) (registration.EmailVerificationChallenge, error)
+	VerifyEmail(context.Context, registration.EmailVerificationInput) (registration.Result, error)
+}
+
 type ReadinessDependency struct {
 	Name      string `json:"name"`
 	Status    string `json:"status"`
@@ -186,11 +193,13 @@ type Server struct {
 	sessionAuthSecret                string
 	allowDevelopmentAuth             bool
 	allowSelfSignup                  bool
+	requireEmailVerification         bool
 	forceSecureSessionCookies        bool
 	authReader                       auth.Reader
 	passwordAuthenticator            auth.PasswordAuthenticator
 	passwordChanger                  auth.PasswordChanger
 	registrationService              RegistrationService
+	emailVerificationSender          func(context.Context, registration.EmailVerificationChallenge) error
 	authSessionStore                 auth.SessionStore
 	authorizer                       auth.Authorizer
 	writerStarter                    workflows.WriterStarter
@@ -303,6 +312,7 @@ const jwtSessionAudience = "mirofish-api"
 const sessionTTL = 7 * 24 * time.Hour
 
 type actorUserIDContextKey struct{}
+type tenantIDContextKey struct{}
 type csrfVerifiedContextKey struct{}
 
 type errorEnvelope struct {
@@ -335,6 +345,10 @@ type signupRequest struct {
 	Email        string `json:"email"`
 	Password     string `json:"password"`
 	ProjectTitle string `json:"project_title"`
+}
+
+type signupVerificationRequest struct {
+	Token string `json:"token"`
 }
 
 type changePasswordRequest struct {
@@ -1158,11 +1172,13 @@ func NewServer(config Config) *Server {
 		sessionAuthSecret:                strings.TrimSpace(config.SessionAuthSecret),
 		allowDevelopmentAuth:             config.AllowDevelopmentAuth,
 		allowSelfSignup:                  config.AllowSelfSignup,
+		requireEmailVerification:         config.RequireEmailVerification,
 		forceSecureSessionCookies:        config.ForceSecureSessionCookies,
 		authReader:                       authReader,
 		passwordAuthenticator:            config.PasswordAuthenticator,
 		passwordChanger:                  config.PasswordChanger,
 		registrationService:              config.RegistrationService,
+		emailVerificationSender:          config.EmailVerificationSender,
 		authSessionStore:                 config.AuthSessionStore,
 		authorizer:                       authorizer,
 		writerStarter:                    starter,
@@ -1268,6 +1284,12 @@ func ActorUserIDFromContext(ctx context.Context) (string, bool) {
 	return userID, ok && userID != ""
 }
 
+func TenantIDFromContext(ctx context.Context) (string, bool) {
+	tenantID, ok := ctx.Value(tenantIDContextKey{}).(string)
+	tenantID = strings.TrimSpace(tenantID)
+	return tenantID, ok && tenantID != ""
+}
+
 func RequestCSRFVerified(ctx context.Context) bool {
 	verified, _ := ctx.Value(csrfVerifiedContextKey{}).(bool)
 	return verified
@@ -1291,6 +1313,41 @@ func (s *Server) withResolvedActorUserID(response http.ResponseWriter, request *
 		return request, true
 	}
 	return request.WithContext(context.WithValue(request.Context(), actorUserIDContextKey{}, userID)), true
+}
+
+func (s *Server) withResolvedTenantID(response http.ResponseWriter, request *http.Request) (*http.Request, bool) {
+	if request.URL.Path == "/v1/me" {
+		return request, true
+	}
+	tenantID := strings.TrimSpace(request.Header.Get("X-Tenant-Id"))
+	if tenantID == "" {
+		return request, true
+	}
+	actorID, ok := ActorUserIDFromContext(request.Context())
+	if !ok {
+		writeError(response, request, http.StatusUnauthorized, auth.CodeUnauthenticated, authPublicErrorMessage(auth.CodeUnauthenticated), nil)
+		return request, false
+	}
+	if _, disabled := s.authReader.(auth.DisabledReader); disabled {
+		request.Header.Set("X-Tenant-Id", tenantID)
+		return request.WithContext(context.WithValue(request.Context(), tenantIDContextKey{}, tenantID)), true
+	}
+	currentUser, err := s.authReader.GetCurrentUser(request.Context(), auth.GetCurrentUserInput{
+		UserID: actorID, RequestID: requestID(request),
+	})
+	if err != nil {
+		code := publicAuthCode(auth.ErrorCode(err))
+		writeError(response, request, statusForAuthCode(code), code, authPublicErrorMessage(code), nil)
+		return request, false
+	}
+	for _, membership := range currentUser.ActiveTenants {
+		if strings.TrimSpace(membership.TenantID) == tenantID && strings.TrimSpace(membership.Status) == "active" {
+			request.Header.Set("X-Tenant-Id", tenantID)
+			return request.WithContext(context.WithValue(request.Context(), tenantIDContextKey{}, tenantID)), true
+		}
+	}
+	writeError(response, request, http.StatusForbidden, auth.CodeAccessDenied, authPublicErrorMessage(auth.CodeAccessDenied), nil)
+	return request, false
 }
 
 func hasPresentedActorCredential(request *http.Request) bool {
@@ -2317,6 +2374,12 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		if !ok {
 			return
 		}
+		if _, actorOK := ActorUserIDFromContext(request.Context()); actorOK {
+			request, ok = s.withResolvedTenantID(response, request)
+			if !ok {
+				return
+			}
+		}
 	}
 	// All control-plane JSON bodies are bounded before any handler decoder runs.
 	// Raw source-object uploads are the only intentionally large request body and
@@ -2337,6 +2400,8 @@ func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) 
 		s.handlePasswordLogin(response, request)
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/signup":
 		s.handleSignup(response, request)
+	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/signup/verify":
+		s.handleVerifySignupEmail(response, request)
 	case isAuthRecoveryRoute(request.Method, request.URL.Path):
 		s.serveMountedHandler(response, request, s.authRecoveryHandler, "AUTH_RECOVERY_BACKEND_UNCONFIGURED")
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/password/change":
@@ -2832,6 +2897,10 @@ func (s *Server) handleSignup(response http.ResponseWriter, request *http.Reques
 	}) {
 		return
 	}
+	if s.requireEmailVerification {
+		s.handleEmailVerificationStart(response, request, payload)
+		return
+	}
 	initialSessionToken := ""
 	result, err := s.registrationService.Register(request.Context(), registration.RegisterInput{
 		DisplayName:  payload.DisplayName,
@@ -2894,6 +2963,94 @@ func (s *Server) handleSignup(response http.ResponseWriter, request *http.Reques
 			Role:      result.Project.Role,
 			Status:    result.Project.Status,
 		}},
+	}
+	s.writeCreatedSession(response, request, currentUser, initialSessionToken)
+}
+
+func (s *Server) handleEmailVerificationStart(response http.ResponseWriter, request *http.Request, payload signupRequest) {
+	service, ok := s.registrationService.(EmailVerificationService)
+	if !ok || s.emailVerificationSender == nil {
+		writeError(response, request, http.StatusServiceUnavailable, registration.CodeBackendUnconfigured, "registration email verification is not configured", nil)
+		return
+	}
+	challenge, err := service.StartEmailVerification(request.Context(), registration.EmailVerificationStartInput{
+		DisplayName: payload.DisplayName, Email: payload.Email, Password: payload.Password, ProjectTitle: payload.ProjectTitle,
+	})
+	if err != nil {
+		code := registration.ErrorCode(err)
+		status := http.StatusServiceUnavailable
+		message := "registration failed"
+		var details map[string]any
+		if code == registration.CodeValidationFailed {
+			status = http.StatusBadRequest
+			message = "registration details are invalid"
+			if field := registration.ErrorField(err); field != "" {
+				details = map[string]any{"field": field}
+			}
+		}
+		writeError(response, request, status, code, message, details)
+		return
+	}
+	if strings.TrimSpace(challenge.Token) != "" {
+		if err := s.emailVerificationSender(request.Context(), challenge); err != nil {
+			writeError(response, request, http.StatusServiceUnavailable, registration.CodeRegistrationFailed, "registration email delivery is unavailable", nil)
+			return
+		}
+	}
+	writeJSON(response, http.StatusAccepted, map[string]string{
+		"status":  "verification_required",
+		"message": "If this address can be registered, a verification email has been sent.",
+	})
+}
+
+func (s *Server) handleVerifySignupEmail(response http.ResponseWriter, request *http.Request) {
+	service, ok := s.registrationService.(EmailVerificationService)
+	if !ok || strings.TrimSpace(s.sessionAuthSecret) == "" {
+		writeError(response, request, http.StatusServiceUnavailable, registration.CodeBackendUnconfigured, "registration email verification is not configured", nil)
+		return
+	}
+	var payload signupVerificationRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(response, request, http.StatusBadRequest, registration.CodeValidationFailed, "invalid verification payload", nil)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(response, request, http.StatusBadRequest, registration.CodeValidationFailed, "invalid verification payload", nil)
+		return
+	}
+	initialSessionToken := ""
+	result, err := service.VerifyEmail(request.Context(), registration.EmailVerificationInput{
+		Token: payload.Token,
+		InitialSessionFactory: func(userID string) (registration.InitialSession, error) {
+			token, ok := s.signSessionToken(userID)
+			if !ok {
+				return registration.InitialSession{}, errors.New("initial session token generation failed")
+			}
+			initialSessionToken = token
+			return registration.InitialSession{TokenHash: hashSessionToken(token), ExpiresAt: time.Now().UTC().Add(sessionTTL)}, nil
+		},
+	})
+	if err != nil {
+		code := registration.ErrorCode(err)
+		status := http.StatusBadRequest
+		message := "email verification link is invalid or expired"
+		if code == registration.CodeBackendUnconfigured || code == registration.CodeRegistrationFailed {
+			status = http.StatusServiceUnavailable
+			message = "registration failed"
+		}
+		writeError(response, request, status, code, message, nil)
+		return
+	}
+	if strings.TrimSpace(initialSessionToken) == "" {
+		writeError(response, request, http.StatusServiceUnavailable, registration.CodeRegistrationFailed, "registration failed", nil)
+		return
+	}
+	currentUser := auth.CurrentUser{
+		User:           auth.UserSummary{UserID: result.User.UserID, Email: result.User.Email, DisplayName: result.User.DisplayName},
+		ActiveTenants:  []auth.TenantMembershipSummary{{TenantID: result.Workspace.TenantID, Name: result.Workspace.Name, Role: result.Workspace.Role, Status: result.Workspace.Status}},
+		ActiveProjects: []auth.ProjectMembershipSummary{{TenantID: result.Project.TenantID, ProjectID: result.Project.ProjectID, Name: result.Project.Title, Role: result.Project.Role, Status: result.Project.Status}},
 	}
 	s.writeCreatedSession(response, request, currentUser, initialSessionToken)
 }
@@ -3169,7 +3326,7 @@ func (s *Server) handleRevokeCurrentSession(response http.ResponseWriter, reques
 		Expires:  time.Unix(0, 0).UTC(),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   request.TLS != nil,
+		Secure:   s.secureSessionCookie(request),
 	})
 	response.WriteHeader(http.StatusNoContent)
 }
@@ -3219,7 +3376,7 @@ func (s *Server) handleRevokeAllCurrentUserSessions(response http.ResponseWriter
 			Expires:  time.Unix(0, 0).UTC(),
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
-			Secure:   request.TLS != nil,
+			Secure:   s.secureSessionCookie(request),
 		})
 	}
 	response.WriteHeader(http.StatusNoContent)
@@ -3306,7 +3463,7 @@ func (s *Server) handleRotateCurrentSession(response http.ResponseWriter, reques
 		MaxAge:   int(sessionTTL.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   request.TLS != nil,
+		Secure:   s.secureSessionCookie(request),
 	})
 	response.WriteHeader(http.StatusNoContent)
 }
@@ -3365,7 +3522,7 @@ func (s *Server) handleRotateCurrentSessionToJWT(response http.ResponseWriter, r
 		MaxAge:   int(sessionTTL.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   request.TLS != nil,
+		Secure:   s.secureSessionCookie(request),
 	})
 	response.WriteHeader(http.StatusNoContent)
 }
@@ -4766,7 +4923,7 @@ func (s *Server) handleStartWorldlineSession(response http.ResponseWriter, reque
 		Options:      cloneOptions(sanitizeAssetPayload(payload.Options)),
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), publicAppErrorMessage(worldline.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, startWorldlineSessionResponse{
@@ -5244,7 +5401,7 @@ func (s *Server) handleStartWorldlineStep(response http.ResponseWriter, request 
 		Options:     cloneOptions(sanitizeAssetPayload(payload.Options)),
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), publicAppErrorMessage(worldline.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, run)
@@ -5374,7 +5531,7 @@ func (s *Server) handleListWorldlineSessions(response http.ResponseWriter, reque
 		ProjectID: projectID,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), publicAppErrorMessage(worldline.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, listResponse[worldline.SessionRecord]{Items: items})
@@ -5640,7 +5797,7 @@ func (s *Server) handleInjectWorldlineVariable(response http.ResponseWriter, req
 		Source:      strings.TrimSpace(payload.Source),
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), publicAppErrorMessage(worldline.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, record)
@@ -5665,7 +5822,7 @@ func (s *Server) handleListWorldlineVariables(response http.ResponseWriter, requ
 		SessionID: sessionID,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), publicAppErrorMessage(worldline.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, listResponse[worldline.VariableRecord]{Items: items})
@@ -5703,7 +5860,7 @@ func (s *Server) handleSetWorldlineVariableLocked(response http.ResponseWriter, 
 		Locked:      payload.Locked,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), publicAppErrorMessage(worldline.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, record)
@@ -5742,7 +5899,7 @@ func (s *Server) handleCreateWorldlineSavedPath(response http.ResponseWriter, re
 		WriterInstruction: strings.TrimSpace(payload.WriterInstruction),
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(worldline.ErrorCode(err)), worldline.ErrorCode(err), publicAppErrorMessage(worldline.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusAccepted, record)
@@ -5909,7 +6066,7 @@ func (s *Server) handleSearchAssets(response http.ResponseWriter, request *http.
 		Filters:   payload.Filters,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), publicAppErrorMessage(assets.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, listResponse[assets.SearchRecord]{Items: items})
@@ -5936,7 +6093,7 @@ func (s *Server) handleListArchiveMemories(response http.ResponseWriter, request
 		AssetID:   assetID,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), publicAppErrorMessage(assets.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, listResponse[assets.ArchiveMemoryRecord]{Items: items})
@@ -5963,7 +6120,7 @@ func (s *Server) handleListArchiveMemoryEvents(response http.ResponseWriter, req
 		AssetID:   assetID,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), publicAppErrorMessage(assets.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, listResponse[assets.ArchiveMemoryEventRecord]{Items: items})
@@ -6504,7 +6661,7 @@ func (s *Server) handleGetStoryGraphView(response http.ResponseWriter, request *
 		IncludeEdges: queryBool(request.URL.Query().Get("include_edges")),
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), publicAppErrorMessage(storygraph.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, view)
@@ -6538,7 +6695,7 @@ func (s *Server) handleGetStoryGraphEvidence(response http.ResponseWriter, reque
 			ActorID:   s.actorUserID(request),
 		})
 		if err != nil {
-			writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), err.Error(), nil)
+			writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), publicAppErrorMessage(storygraph.ErrorCode(err)), nil)
 			return
 		}
 	}
@@ -6551,7 +6708,7 @@ func (s *Server) handleGetStoryGraphEvidence(response http.ResponseWriter, reque
 		IncludeSnippet: includeFull,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), publicAppErrorMessage(storygraph.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, evidence)
@@ -6577,7 +6734,7 @@ func (s *Server) handleGetStoryGraphLayout(response http.ResponseWriter, request
 		ViewID:    viewID,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), publicAppErrorMessage(storygraph.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, layout)
@@ -6612,7 +6769,7 @@ func (s *Server) handleListStoryGraphClusters(response http.ResponseWriter, requ
 		Offset:    offset,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), publicAppErrorMessage(storygraph.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, clusters)
@@ -6638,7 +6795,7 @@ func (s *Server) handleGetStoryGraphNode(response http.ResponseWriter, request *
 		NodeID:    nodeID,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), publicAppErrorMessage(storygraph.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, node)
@@ -6664,7 +6821,7 @@ func (s *Server) handleGetStoryGraphEdge(response http.ResponseWriter, request *
 		EdgeID:    edgeID,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(storygraph.ErrorCode(err)), storygraph.ErrorCode(err), publicAppErrorMessage(storygraph.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, edge)
@@ -6729,7 +6886,7 @@ func (s *Server) handleAdoptAsset(response http.ResponseWriter, request *http.Re
 		TargetLifecycle: strings.TrimSpace(payload.TargetLifecycle),
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), publicAppErrorMessage(assets.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, record)
@@ -6787,7 +6944,7 @@ func (s *Server) handlePatchAsset(response http.ResponseWriter, request *http.Re
 		Pinned:       payload.Pinned,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), publicAppErrorMessage(assets.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, record)
@@ -6814,7 +6971,7 @@ func (s *Server) handleDeleteAsset(response http.ResponseWriter, request *http.R
 		RequestID: requestID(request),
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(assets.ErrorCode(err)), assets.ErrorCode(err), publicAppErrorMessage(assets.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, result)
@@ -7576,7 +7733,7 @@ func (s *Server) handleExportAgentTrace(response http.ResponseWriter, request *h
 			ActorID:   s.actorUserID(request),
 		})
 		if err != nil {
-			writeError(response, request, statusForAppCode(traces.ErrorCode(err)), traces.ErrorCode(err), err.Error(), nil)
+			writeError(response, request, statusForAppCode(traces.ErrorCode(err)), traces.ErrorCode(err), publicAppErrorMessage(traces.ErrorCode(err)), nil)
 			return
 		}
 	}
@@ -7594,7 +7751,7 @@ func (s *Server) handleExportAgentTrace(response http.ResponseWriter, request *h
 		IncludeFull: payload.IncludeFull,
 	})
 	if err != nil {
-		writeError(response, request, statusForAppCode(traces.ErrorCode(err)), traces.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(traces.ErrorCode(err)), traces.ErrorCode(err), publicAppErrorMessage(traces.ErrorCode(err)), nil)
 		return
 	}
 	if err := s.traceExportAuditor.RecordExport(request.Context(), traces.ExportAuditInput{
@@ -7606,7 +7763,7 @@ func (s *Server) handleExportAgentTrace(response http.ResponseWriter, request *h
 		IncludeFull: payload.IncludeFull,
 		EventCount:  len(items),
 	}); err != nil {
-		writeError(response, request, statusForAppCode(traces.ErrorCode(err)), traces.ErrorCode(err), err.Error(), nil)
+		writeError(response, request, statusForAppCode(traces.ErrorCode(err)), traces.ErrorCode(err), publicAppErrorMessage(traces.ErrorCode(err)), nil)
 		return
 	}
 	writeJSON(response, http.StatusOK, traceExportResponse{
@@ -9701,6 +9858,8 @@ func publicAppErrorMessage(code string) string {
 	switch {
 	case code == "VALIDATION_FAILED":
 		return "invalid request"
+	case code == "WORLDLINE_STEP_ACTIVE":
+		return "worldline session already has an active step"
 	case code == "NOT_FOUND":
 		return "resource not found"
 	case strings.Contains(code, "BACKEND_UNCONFIGURED"):

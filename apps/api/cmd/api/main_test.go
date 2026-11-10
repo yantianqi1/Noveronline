@@ -46,9 +46,33 @@ func TestOpenAppDatabaseUsesBoundedPool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() { _ = closeAppDatabase(db) }()
 	if db.Stats().MaxOpenConnections != appDatabaseMaxOpenConnections {
 		t.Fatalf("unexpected app database pool bound: %#v", db.Stats())
+	}
+}
+
+func TestOpenAppDatabaseReusesPoolPerDSNUntilAllLeasesClose(t *testing.T) {
+	const databaseURL = "postgres://app:private@127.0.0.1:1/shared?sslmode=disable"
+	first, err := openAppDatabase(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := openAppDatabase(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatal("same app DSN created more than one database pool")
+	}
+	if err := closeAppDatabase(first); err != nil {
+		t.Fatalf("close first lease: %v", err)
+	}
+	if second.Stats().MaxOpenConnections != appDatabaseMaxOpenConnections {
+		t.Fatalf("first lease closed the shared pool: %#v", second.Stats())
+	}
+	if err := closeAppDatabase(second); err != nil {
+		t.Fatalf("close final lease: %v", err)
 	}
 }
 

@@ -2,10 +2,14 @@ package registration
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"net/mail"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -30,6 +34,7 @@ type Service struct {
 	beginTx      func(context.Context) (transaction, error)
 	hashPassword func([]byte, int) ([]byte, error)
 	newUUID      func() (uuid.UUID, error)
+	newToken     func() (string, string, error)
 	bcryptCost   int
 }
 
@@ -60,6 +65,7 @@ func NewService(config ServiceConfig) *Service {
 	service := &Service{
 		hashPassword: bcrypt.GenerateFromPassword,
 		newUUID:      uuid.NewRandom,
+		newToken:     newVerificationToken,
 		bcryptCost:   cost,
 	}
 	if config.DB != nil {
@@ -72,6 +78,133 @@ func NewService(config ServiceConfig) *Service {
 		}
 	}
 	return service
+}
+
+func (s *Service) StartEmailVerification(ctx context.Context, input EmailVerificationStartInput) (EmailVerificationChallenge, error) {
+	normalized, err := validateAndNormalize(RegisterInput{
+		DisplayName: input.DisplayName, Email: input.Email, Password: input.Password, ProjectTitle: input.ProjectTitle,
+	})
+	if err != nil {
+		return EmailVerificationChallenge{}, err
+	}
+	if s == nil || s.beginTx == nil || s.hashPassword == nil || s.newUUID == nil || s.newToken == nil {
+		return EmailVerificationChallenge{}, backendUnconfiguredError()
+	}
+	passwordHash, err := s.hashPassword([]byte(normalized.Password), s.bcryptCost)
+	if err != nil {
+		return EmailVerificationChallenge{}, registrationFailedError()
+	}
+	token, tokenHash, err := s.newToken()
+	if err != nil {
+		return EmailVerificationChallenge{}, registrationFailedError()
+	}
+	expiresAt := time.Now().UTC().Add(30 * time.Minute)
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return EmailVerificationChallenge{}, registrationFailedError()
+	}
+	defer tx.Rollback()
+
+	var accountExists bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM users WHERE lower(btrim(email)) = $1)`, normalized.Email,
+	).Scan(&accountExists); err != nil {
+		return EmailVerificationChallenge{}, registrationFailedError()
+	}
+	if accountExists {
+		// Keep the response indistinguishable from a new request. Do not create
+		// a challenge for an existing account, but never reveal that fact.
+		return EmailVerificationChallenge{Email: normalized.Email, ExpiresAt: expiresAt}, nil
+	}
+	pendingID, err := s.newUUID()
+	if err != nil || pendingID == uuid.Nil {
+		return EmailVerificationChallenge{}, registrationFailedError()
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO pending_email_registrations (
+  pending_registration_id, email, display_name, password_hash, project_title,
+  token_hash, expires_at, consumed_at
+) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, NULL)
+ON CONFLICT (email) DO UPDATE SET
+  display_name = EXCLUDED.display_name,
+  password_hash = EXCLUDED.password_hash,
+  project_title = EXCLUDED.project_title,
+  token_hash = EXCLUDED.token_hash,
+  expires_at = EXCLUDED.expires_at,
+  consumed_at = NULL,
+  updated_at = now()`, pendingID, normalized.Email, normalized.DisplayName, string(passwordHash), normalized.ProjectTitle, tokenHash, expiresAt); err != nil {
+		if isUniqueViolation(err) {
+			return EmailVerificationChallenge{Email: normalized.Email, ExpiresAt: expiresAt}, nil
+		}
+		return EmailVerificationChallenge{}, registrationFailedError()
+	}
+	if err := tx.Commit(); err != nil {
+		return EmailVerificationChallenge{}, registrationFailedError()
+	}
+	return EmailVerificationChallenge{Email: normalized.Email, Token: token, ExpiresAt: expiresAt}, nil
+}
+
+func (s *Service) VerifyEmail(ctx context.Context, input EmailVerificationInput) (Result, error) {
+	token := strings.TrimSpace(input.Token)
+	if token == "" || input.InitialSessionFactory == nil {
+		return Result{}, validationError("token", "verification token is required")
+	}
+	if s == nil || s.beginTx == nil || s.newUUID == nil {
+		return Result{}, backendUnconfiguredError()
+	}
+	tokenHash := hashVerificationToken(token)
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return Result{}, registrationFailedError()
+	}
+	defer tx.Rollback()
+	var pendingID, email, displayName, passwordHash, projectTitle string
+	var expiresAt time.Time
+	if err := tx.QueryRowContext(ctx, `
+SELECT pending_registration_id::text, email, display_name, password_hash, project_title, expires_at
+FROM pending_email_registrations
+WHERE token_hash = $1 AND consumed_at IS NULL
+FOR UPDATE`, tokenHash).Scan(&pendingID, &email, &displayName, &passwordHash, &projectTitle, &expiresAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Result{}, verificationInvalidError()
+		}
+		return Result{}, registrationFailedError()
+	}
+	if !expiresAt.After(time.Now().UTC()) {
+		return Result{}, verificationExpiredError()
+	}
+	normalized := normalizedInput{DisplayName: displayName, Email: email, Password: "", ProjectTitle: projectTitle}
+	identities, err := s.newIdentities()
+	if err != nil {
+		return Result{}, registrationFailedError()
+	}
+	initialSession, err := input.InitialSessionFactory(identities.userID)
+	if err != nil || strings.TrimSpace(initialSession.TokenHash) == "" || initialSession.ExpiresAt.IsZero() {
+		return Result{}, registrationFailedError()
+	}
+	var accountExists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE lower(btrim(email)) = $1)`, email).Scan(&accountExists); err != nil {
+		return Result{}, registrationFailedError()
+	}
+	if accountExists {
+		if _, err := tx.ExecContext(ctx, `UPDATE pending_email_registrations SET consumed_at = now(), updated_at = now() WHERE pending_registration_id = $1::uuid AND consumed_at IS NULL`, pendingID); err != nil {
+			return Result{}, registrationFailedError()
+		}
+		if err := tx.Commit(); err != nil {
+			return Result{}, registrationFailedError()
+		}
+		return Result{}, verificationInvalidError()
+	}
+	if err := s.insertVerifiedAccount(ctx, tx, normalized, identities, passwordHash, initialSession); err != nil {
+		return Result{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE pending_email_registrations SET consumed_at = now(), updated_at = now() WHERE pending_registration_id = $1::uuid AND consumed_at IS NULL`, pendingID); err != nil {
+		return Result{}, registrationFailedError()
+	}
+	if err := tx.Commit(); err != nil {
+		return Result{}, registrationFailedError()
+	}
+	return newResult(normalized, identities), nil
 }
 
 func (s *Service) Register(ctx context.Context, input RegisterInput) (Result, error) {
@@ -176,6 +309,61 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (Result, er
 	}
 
 	return newResult(normalized, identities), nil
+}
+
+func (s *Service) insertVerifiedAccount(ctx context.Context, tx transaction, input normalizedInput, identities generatedIdentities, passwordHash string, initialSession InitialSession) error {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO users (
+  user_id, email, display_name, status
+) VALUES ($1::uuid, $2, $3, 'active')`, identities.userID, input.Email, input.DisplayName); err != nil {
+		if isUniqueViolation(err) {
+			return verificationInvalidError()
+		}
+		return registrationFailedError()
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO user_password_credentials (
+  user_id, password_hash, status
+) VALUES ($1::uuid, $2, 'active')`, identities.userID, passwordHash); err != nil {
+		return registrationFailedError()
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO user_sessions (
+  user_id, token_hash, status, expires_at, revoked_at, last_seen_at
+) VALUES ($1::uuid, $2, 'active', $3, NULL, now())`, identities.userID, strings.TrimSpace(initialSession.TokenHash), initialSession.ExpiresAt.UTC()); err != nil {
+		return registrationFailedError()
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO tenants (
+  tenant_id, slug, name, tenant_type, plan, status
+) VALUES ($1::uuid, $2, $3, 'personal', 'free', 'active')`, identities.tenantID, identities.workspaceSlug, personalWorkspaceName(input.DisplayName)); err != nil {
+		return registrationFailedError()
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT app_set_tenant_context($1::uuid, $2::uuid, false)`, identities.tenantID, identities.userID); err != nil {
+		return registrationFailedError()
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO tenant_memberships (
+  tenant_id, user_id, role, status, joined_at
+) VALUES ($1::uuid, $2::uuid, 'owner', 'active', now())`, identities.tenantID, identities.userID); err != nil {
+		return registrationFailedError()
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO projects (
+  tenant_id, project_id, title, status, created_by
+) VALUES ($1::uuid, $2::uuid, $3, 'active', $4::uuid)`, identities.tenantID, identities.projectID, input.ProjectTitle, identities.userID); err != nil {
+		return registrationFailedError()
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO project_members (
+  tenant_id, project_id, user_id, role, status
+) VALUES ($1::uuid, $2::uuid, $3::uuid, 'project_owner', 'active')`, identities.tenantID, identities.projectID, identities.userID); err != nil {
+		return registrationFailedError()
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO project_asset_distillation_settings (
+  tenant_id, project_id, trigger_mode, enabled_asset_types, created_by, updated_by
+) VALUES ($1::uuid, $2::uuid, 'after_adoption', ARRAY[]::TEXT[], $3::uuid, $3::uuid)`, identities.tenantID, identities.projectID, identities.userID); err != nil {
+		return registrationFailedError()
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO llm_quota_policies (
+  tenant_id, scope_type, project_id, module_key, token_limit, concurrency_limit, period_seconds, enabled, updated_by
+) VALUES ($1::uuid, 'tenant', NULL, NULL, 5000000, 8, 2592000, true, $2::uuid)`, identities.tenantID, identities.userID); err != nil {
+		return registrationFailedError()
+	}
+	return nil
 }
 
 type normalizedInput struct {
@@ -298,6 +486,20 @@ func isUniqueViolation(err error) bool {
 	return errors.As(err, &stateError) && stateError.SQLState() == "23505"
 }
 
+func newVerificationToken() (string, string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", "", err
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw)
+	return token, hashVerificationToken(token), nil
+}
+
+func hashVerificationToken(token string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return base64.RawURLEncoding.EncodeToString(digest[:])
+}
+
 func validationError(field, message string) error {
 	return &AppError{Code: CodeValidationFailed, Message: message, Field: field}
 }
@@ -312,4 +514,12 @@ func backendUnconfiguredError() error {
 
 func registrationFailedError() error {
 	return &AppError{Code: CodeRegistrationFailed, Message: "registration failed"}
+}
+
+func verificationInvalidError() error {
+	return &AppError{Code: CodeVerificationInvalid, Message: "email verification link is invalid"}
+}
+
+func verificationExpiredError() error {
+	return &AppError{Code: CodeVerificationExpired, Message: "email verification link has expired"}
 }

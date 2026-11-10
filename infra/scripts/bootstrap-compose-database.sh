@@ -17,7 +17,6 @@ CREATE TABLE IF NOT EXISTS mirofish_schema_migrations (
   execution_kind TEXT NOT NULL CHECK (execution_kind IN ('applied', 'baselined'))
 );
 REVOKE ALL ON mirofish_schema_migrations FROM PUBLIC;
-GRANT SELECT ON mirofish_schema_migrations TO "$APP_DATABASE_USER";
 SQL
 
 migration_marker_present() {
@@ -379,6 +378,16 @@ migration_marker_present() {
 	        WHERE conname = 'manuscript_asset_distillation_tenant_id_project_id_input_fi_key'
 	          AND conrelid = 'public.manuscript_asset_distillation_requests'::regclass
 	      )" ;;
+	    0032_*) marker="
+	      to_regclass('public.pending_email_registrations') IS NOT NULL
+	      AND to_regclass('public.idx_pending_email_registrations_active') IS NOT NULL
+	      AND to_regclass('public.idx_pending_email_registrations_token') IS NOT NULL
+	      AND has_table_privilege('mirofish_app', 'public.pending_email_registrations', 'SELECT,INSERT,UPDATE,DELETE')
+	      AND NOT EXISTS (
+	        SELECT 1 FROM information_schema.role_table_grants
+	        WHERE grantee = 'PUBLIC' AND table_schema = 'public'
+	          AND table_name = 'pending_email_registrations'
+	      )" ;;
 	    *) return 1 ;;
   esac
   [ "$(psql -At -v ON_ERROR_STOP=1 -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT $marker")" = "t" ]
@@ -444,6 +453,8 @@ SELECT format(
 )
 \gexec
 SELECT format('GRANT mirofish_app TO %I', :'app_database_user')
+\gexec
+SELECT format('GRANT SELECT ON mirofish_schema_migrations TO %I', :'app_database_user')
 \gexec
 SQL
 
